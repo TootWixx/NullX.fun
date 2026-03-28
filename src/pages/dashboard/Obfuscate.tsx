@@ -55,6 +55,7 @@ export default function Obfuscate() {
 
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
   const supabaseAnonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  const appBaseUrl = (import.meta.env.VITE_MAIN_SITE_URL || window.location.origin).replace(/\/$/, '');
 
   const fetchData = async () => {
     if (!user) return;
@@ -327,7 +328,7 @@ cpLabel.Font = Enum.Font.Gotham
 cpLabel.Parent = frame
 
 getKeyBtn.MouseButton1Click:Connect(function()
-    local url = "${window.location.origin}/get-key/${selectedProject}"
+    local url = "${appBaseUrl}/get-key/${selectedProject}"
     if syn and syn.openURL then
         syn.openURL(url)
         status.Text = "\u{2705} Opening checkpoints..."
@@ -452,7 +453,7 @@ local player = Players.LocalPlayer
 local SUPABASE_URL = "${supabaseUrl}"        -- your Supabase project URL
 local PANEL_KEY    = "${panelKey}"          -- your NullX panel key
 local PROJECT_ID   = "${selectedProject}"   -- your project / script ID
-local PROJECT_URL  = "${window.location.origin}"
+local PROJECT_URL  = "${appBaseUrl}"
 
 local NOVA_API   = SUPABASE_URL .. "/functions/v1/validate"
 local HEARTBEAT  = SUPABASE_URL .. "/functions/v1/heartbeat"
