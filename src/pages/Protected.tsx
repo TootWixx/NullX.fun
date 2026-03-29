@@ -1,5 +1,5 @@
 import { useParams } from 'react-router-dom';
-import { Lock } from 'lucide-react';
+import { Lock, Shield } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 
 export default function Protected() {

@@ -30,7 +30,7 @@ function publicSiteUrl(req: Request): string {
   }
   const origin = req.headers.get("origin");
   if (origin) return origin.replace(/\/$/, "");
-  return "https://novaprotected.com";
+  return "https://null-x-fun.vercel.app";
 }
 
 Deno.serve(async (req) => {
