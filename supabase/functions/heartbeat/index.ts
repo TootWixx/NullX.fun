@@ -25,19 +25,21 @@ Deno.serve(async (req) => {
       );
     }
 
-    // If this is a reply from the user, store it
-    if (reply_message && reply_to_id) {
+    // If this is a message from the user, store it (reply_to_id can be null for first message / chat opener)
+    if (reply_message) {
       const { error: replyError } = await supabase
         .from("message_threads")
         .insert({
           session_id,
           sender_type: "user",
           message: reply_message,
-          reply_to_message_id: reply_to_id,
+          reply_to_message_id: reply_to_id || null,
+          notification_type: reply_to_id ? "reply" : "chat_open",
+          can_reply: true,
         });
       
       if (replyError) {
-        console.error("Error storing reply:", replyError);
+        console.error("Error storing user message:", replyError);
       }
     }
 

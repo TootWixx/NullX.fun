@@ -1103,8 +1103,11 @@ local function ShowNotification(data)
     end)
 end
 
+-- Track if user has sent first message to open chat
+local ChatStarted = false
+
 -- Create Chat Window
-local function OpenChatWindow()
+local function OpenChatWindow(autoShowMessages)
     if ChatUI and ChatUI.Parent then
         ChatUI.Visible = true
         return
@@ -1184,7 +1187,10 @@ local function OpenChatWindow()
         ShowFloatingButton()
     end)
     
+    -- Minimize just hides chat (does NOT destroy), close button destroys
+    local isMinimized = false
     minBtn.MouseButton1Click:Connect(function()
+        isMinimized = true
         ChatUI.Visible = false
         ShowFloatingButton()
     end)
@@ -1220,29 +1226,13 @@ local function OpenChatWindow()
     inputBox.Position = UDim2.new(0, 15, 0, 5)
     inputBox.BackgroundTransparency = 1
     inputBox.Text = ""
-    inputBox.PlaceholderText = "Click to open a chat..."
+    -- If chat not started yet, prompt user to send first message
+    inputBox.PlaceholderText = ChatStarted and "Type a message..." or "Send a message to open chat..."
     inputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
     inputBox.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
     inputBox.Font = Enum.Font.Gotham
     inputBox.TextSize = 14
     inputBox.ClearTextOnFocus = false
-    
-    -- Handle initial chat open
-    local isFirstMessage = true
-    local function OpenChatPrompt()
-        if isFirstMessage then
-            inputBox.PlaceholderText = "Type your first message..."
-            inputBox.Text = ""
-            isFirstMessage = false
-            -- Show the chat window when user starts typing
-            ChatUI.Visible = true
-            if FloatingButton then
-                FloatingButton.Visible = false
-            end
-        end
-    end
-    
-    inputBox.Focused:Connect(OpenChatPrompt)
     
     local sendBtn = Instance.new("TextButton", inputBg)
     sendBtn.Size = UDim2.new(0, 50, 0, 30)
@@ -1300,6 +1290,12 @@ local function OpenChatWindow()
         local text = inputBox.Text:gsub("^%s*", ""):gsub("%s*$", "")
         if text == "" then return end
         
+        -- Mark chat as started after first message
+        if not ChatStarted then
+            ChatStarted = true
+            inputBox.PlaceholderText = "Type a message..."
+        end
+        
         -- Find the message we're replying to (most recent admin message)
         local replyToId = nil
         for i = #MessageHistory, 1, -1 do
@@ -1319,16 +1315,14 @@ local function OpenChatWindow()
             timestamp = os.time()
         })
         
-        -- Send to server via heartbeat
-        if replyToId then
-            pcall(function()
-                postJson(HEARTBEAT, {
-                    session_id = _NovaSessionId,
-                    reply_message = text,
-                    reply_to_id = replyToId
-                })
-            end)
-        end
+        -- Send to server via heartbeat (always send user messages so admin can see them)
+        pcall(function()
+            postJson(HEARTBEAT, {
+                session_id = _NovaSessionId,
+                reply_message = text,
+                reply_to_id = replyToId  -- Can be nil for first message
+            })
+        end)
         
         inputBox.Text = ""
     end

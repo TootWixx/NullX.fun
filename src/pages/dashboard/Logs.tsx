@@ -521,7 +521,7 @@ export default function Logs() {
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <MessageSquare className="h-10 w-10 text-muted-foreground mb-3" />
                 <p className="text-muted-foreground">No active chats.</p>
-                <p className="text-xs text-muted-foreground mt-1 px-4">Send messages to players to start conversations.</p>
+                <p className="text-xs text-muted-foreground mt-1 px-4">Chats appear when you message players or when players open a chat with you.</p>
               </div>
             </Card>
           ) : (
@@ -606,6 +606,50 @@ export default function Logs() {
                   </div>
                 ))
               )}
+            </div>
+            <div className="flex gap-2 pt-2 border-t">
+              <Input
+                placeholder="Type a reply..."
+                value={msgInput}
+                onChange={(e) => setMsgInput(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter' && msgInput.trim() && selectedThread) {
+                    const { error } = await supabase.from('message_threads').insert({
+                      session_id: selectedThread,
+                      sender_type: 'admin',
+                      message: msgInput.trim(),
+                      notification_type: 'info',
+                      can_reply: true,
+                    });
+                    if (!error) {
+                      setMsgInput('');
+                      fetchThreadMessages(selectedThread);
+                      fetchActiveChats();
+                    }
+                  }
+                }}
+                className="flex-1"
+              />
+              <Button 
+                onClick={async () => {
+                  if (!msgInput.trim() || !selectedThread) return;
+                  const { error } = await supabase.from('message_threads').insert({
+                    session_id: selectedThread,
+                    sender_type: 'admin',
+                    message: msgInput.trim(),
+                    notification_type: 'info',
+                    can_reply: true,
+                  });
+                  if (!error) {
+                    setMsgInput('');
+                    fetchThreadMessages(selectedThread);
+                    fetchActiveChats();
+                  }
+                }}
+                disabled={!msgInput.trim()}
+              >
+                Send
+              </Button>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setSelectedThread(null)}>Close</Button>
