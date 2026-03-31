@@ -1371,9 +1371,16 @@ end
 
 -- Create Floating Toggle Button
 local function ShowFloatingButton()
-    if FloatingButton and FloatingButton.Parent then
-        FloatingButton.Visible = true
-        return
+    -- Check if button exists and is valid (not destroyed)
+    if FloatingButton then
+        local success = pcall(function() return FloatingButton.Parent end)
+        if success and FloatingButton.Parent then
+            FloatingButton.Visible = true
+            return
+        else
+            -- Button was destroyed, clear reference
+            FloatingButton = nil
+        end
     end
     
     FloatingButton = Instance.new("TextButton")

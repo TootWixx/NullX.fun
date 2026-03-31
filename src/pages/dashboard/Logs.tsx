@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label';
 import { ScrollText, Users, MessageSquare, Skull, RefreshCw, Smartphone, Monitor, Gamepad2, Trash2 } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { ScrollArea } from '@/components/ui/scroll-area';
 
 interface Log {
   id: string;
@@ -58,8 +59,10 @@ export default function Logs() {
   const [logs, setLogs] = useState<Log[]>([]);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
   const [activeChats, setActiveChats] = useState<MessageThread[]>([]);
+  const [groupedChats, setGroupedChats] = useState<Map<string, MessageThread[]>>(new Map());
   const [selectedThread, setSelectedThread] = useState<string | null>(null);
   const [threadMessages, setThreadMessages] = useState<MessageThread[]>([]);
+  const [threadMsgInput, setThreadMsgInput] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
   const [filter, setFilter] = useState('all');
   const [loading, setLoading] = useState(true);
@@ -108,9 +111,13 @@ export default function Logs() {
     const interval = setInterval(() => {
       fetchData();
       fetchActiveChats();
-    }, 10000);
+      // Auto-refresh selected thread messages
+      if (selectedThread) {
+        fetchThreadMessages(selectedThread);
+      }
+    }, 5000); // Refresh every 5 seconds for faster chat updates
     return () => clearInterval(interval);
-  }, []);
+  }, [selectedThread]);
 
   const handleKill = async () => {
     if (!selectedKillSession) return;
@@ -169,12 +176,38 @@ export default function Logs() {
   };
 
   const handleDeleteSession = async (id: string) => {
+      // Also delete related message threads
+      await supabase.from('message_threads').delete().eq('session_id', id);
       const { error } = await supabase.from('active_sessions').delete().eq('id', id);
       if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
       else {
           toast({ title: 'Session Cleared' });
           fetchData();
+          fetchActiveChats();
       }
+  };
+  
+  const handleClearDisconnectedSessions = async () => {
+    const disconnectedIds = activeSessions
+      .filter(s => s.status === 'disconnected' || s.status === 'killed')
+      .map(s => s.id);
+    
+    if (disconnectedIds.length === 0) {
+      toast({ title: 'No Sessions to Clear', description: 'No disconnected or killed sessions found.' });
+      return;
+    }
+    
+    // Delete message threads for these sessions
+    await supabase.from('message_threads').delete().in('session_id', disconnectedIds);
+    // Delete the sessions
+    const { error } = await supabase.from('active_sessions').delete().in('id', disconnectedIds);
+    
+    if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
+    else {
+      toast({ title: 'Sessions Cleared', description: `Removed ${disconnectedIds.length} inactive sessions.` });
+      fetchData();
+      fetchActiveChats();
+    }
   };
 
   const fetchActiveChats = async () => {
@@ -182,8 +215,18 @@ export default function Logs() {
       .from('message_threads')
       .select('*, active_sessions(id, license_keys(key_value), details)')
       .order('created_at', { ascending: false })
-      .limit(100);
-    if (data) setActiveChats(data as MessageThread[]);
+      .limit(200);
+    if (data) {
+      setActiveChats(data as MessageThread[]);
+      // Group messages by session_id to show unique conversations
+      const grouped = new Map<string, MessageThread[]>();
+      (data as MessageThread[]).forEach(msg => {
+        const existing = grouped.get(msg.session_id) || [];
+        existing.push(msg);
+        grouped.set(msg.session_id, existing);
+      });
+      setGroupedChats(grouped);
+    }
   };
 
   const fetchThreadMessages = async (sessionId: string) => {
@@ -365,7 +408,22 @@ export default function Logs() {
               </div>
             </Card>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div className="space-y-4">
+              {/* Clear inactive button */}
+              {activeSessions.some(s => s.status === 'disconnected' || s.status === 'killed') && (
+                <div className="flex justify-end">
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={handleClearDisconnectedSessions}
+                    className="text-xs"
+                  >
+                    <Trash2 className="h-3 w-3 mr-2" />
+                    Clear Inactive Sessions ({activeSessions.filter(s => s.status === 'disconnected' || s.status === 'killed').length})
+                  </Button>
+                </div>
+              )}
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {filteredSessions.map((session) => {
                 const isDisconnected = session.status === 'disconnected';
                 const isKilled = session.status === 'killed';
@@ -468,7 +526,7 @@ export default function Logs() {
                             </DialogFooter>
                           </DialogContent>
                         </Dialog>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:bg-muted/50" onClick={() => handleDeleteSession(session.id)} disabled={isDisconnected} title="Clear Session Record">
+                        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:bg-muted/50 hover:text-destructive" onClick={() => handleDeleteSession(session.id)} title="Delete Session">
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
                      </div>
@@ -511,12 +569,13 @@ export default function Logs() {
                 </Card>
                 );
               })}
+              </div>
             </div>
           )}
         </TabsContent>
 
         <TabsContent value="chats">
-          {activeChats.length === 0 ? (
+          {groupedChats.size === 0 ? (
             <Card className="border-dashed">
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <MessageSquare className="h-10 w-10 text-muted-foreground mb-3" />
@@ -525,137 +584,151 @@ export default function Logs() {
               </div>
             </Card>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {activeChats.map((chat) => (
-                <Card key={chat.id} className="overflow-hidden border-l-4 border-l-green-500 shadow-sm hover:shadow-md transition-all">
-                  <CardHeader className="pb-2 pt-4 px-4">
-                    <div className="space-y-1">
-                      <CardTitle className="text-sm font-bold flex items-center gap-2">
-                        <Users className="h-4 w-4" />
-                        {chat.active_sessions?.details?.roblox_username || 'Unknown User'}
-                      </CardTitle>
-                      <CardDescription className="text-[11px]">
-                        Key: {chat.active_sessions?.license_keys?.key_value?.slice(0, 12)}...
-                      </CardDescription>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="px-4 pb-4 space-y-2">
-                    <div className="rounded bg-muted/50 p-2 text-[11px]">
-                      <span className={chat.sender_type === 'admin' ? 'text-primary' : 'text-blue-500'}>
-                        {chat.sender_type === 'admin' ? 'You: ' : 'User: '}
-                      </span>
-                      <span className="text-foreground/80">{chat.message.slice(0, 60)}{chat.message.length > 60 && '...'}</span>
-                    </div>
-                    <p className="text-[10px] text-muted-foreground">
-                      {new Date(chat.created_at).toLocaleString()}
-                    </p>
-                    <Button 
-                      variant="outline" 
-                      size="sm" 
-                      className="w-full mt-2"
+            <div className="grid gap-4 lg:grid-cols-3">
+              {/* Chat List */}
+              <div className="lg:col-span-1 space-y-2 max-h-[70vh] overflow-y-auto">
+                {Array.from(groupedChats.entries()).map(([sessionId, messages]) => {
+                  const latestMsg = messages[0];
+                  const hasUnreadUser = messages.some(m => m.sender_type === 'user');
+                  return (
+                    <Card 
+                      key={sessionId} 
+                      className={`cursor-pointer transition-all hover:shadow-md ${selectedThread === sessionId ? 'ring-2 ring-primary border-primary' : ''} ${hasUnreadUser ? 'border-l-4 border-l-blue-500' : 'border-l-4 border-l-green-500'}`}
                       onClick={() => {
-                        setSelectedThread(chat.session_id);
-                        fetchThreadMessages(chat.session_id);
+                        setSelectedThread(sessionId);
+                        fetchThreadMessages(sessionId);
                       }}
                     >
-                      View Conversation
-                    </Button>
-                  </CardContent>
-                </Card>
-              ))}
+                      <CardHeader className="py-3 px-4">
+                        <div className="flex items-center justify-between">
+                          <CardTitle className="text-sm font-bold flex items-center gap-2">
+                            <Users className="h-4 w-4" />
+                            {latestMsg.active_sessions?.details?.roblox_username || 'Unknown User'}
+                          </CardTitle>
+                          {hasUnreadUser && (
+                            <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+                          )}
+                        </div>
+                        <CardDescription className="text-[10px] mt-1">
+                          {messages.length} messages
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="py-0 px-4 pb-3">
+                        <div className="text-[11px] text-muted-foreground truncate">
+                          <span className={latestMsg.sender_type === 'admin' ? 'text-primary' : 'text-blue-500'}>
+                            {latestMsg.sender_type === 'admin' ? 'You: ' : 'User: '}
+                          </span>
+                          {latestMsg.message.slice(0, 40)}{latestMsg.message.length > 40 && '...'}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+              
+              {/* Conversation Panel */}
+              <Card className="lg:col-span-2 flex flex-col h-[70vh]">
+                {!selectedThread ? (
+                  <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                    <div className="text-center">
+                      <MessageSquare className="h-12 w-12 mx-auto mb-3 opacity-50" />
+                      <p>Select a conversation to view</p>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <CardHeader className="border-b py-3">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-medium flex items-center gap-2">
+                          <MessageSquare className="h-4 w-4" />
+                          Conversation
+                        </CardTitle>
+                        <Button variant="ghost" size="sm" onClick={() => setSelectedThread(null)}>
+                          Close
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="flex-1 overflow-y-auto p-4 space-y-3">
+                      {threadMessages.length === 0 ? (
+                        <p className="text-center text-muted-foreground text-sm py-8">No messages yet</p>
+                      ) : (
+                        threadMessages.map((msg) => (
+                          <div 
+                            key={msg.id} 
+                            className={`flex ${msg.sender_type === 'admin' ? 'justify-end' : 'justify-start'}`}
+                          >
+                            <div 
+                              className={`max-w-[80%] rounded-lg p-3 text-sm ${
+                                msg.sender_type === 'admin' 
+                                  ? 'bg-primary text-primary-foreground rounded-br-none' 
+                                  : 'bg-muted rounded-bl-none'
+                              }`}
+                            >
+                              <p className="font-medium text-[10px] opacity-80 mb-1">
+                                {msg.sender_type === 'admin' ? 'You (Admin)' : 'Player'}
+                              </p>
+                              <p>{msg.message}</p>
+                              <p className="text-[9px] opacity-60 mt-1 text-right">
+                                {new Date(msg.created_at).toLocaleTimeString()}
+                              </p>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </CardContent>
+                    <div className="border-t p-3">
+                      <div className="flex gap-2">
+                        <Input
+                          placeholder="Type a reply..."
+                          value={threadMsgInput}
+                          onChange={(e) => setThreadMsgInput(e.target.value)}
+                          onKeyDown={async (e) => {
+                            if (e.key === 'Enter' && threadMsgInput.trim() && selectedThread) {
+                              const { error } = await supabase.from('message_threads').insert({
+                                session_id: selectedThread,
+                                sender_type: 'admin',
+                                message: threadMsgInput.trim(),
+                                notification_type: 'info',
+                                can_reply: true,
+                              });
+                              if (!error) {
+                                setThreadMsgInput('');
+                                fetchThreadMessages(selectedThread);
+                                fetchActiveChats();
+                              }
+                            }
+                          }}
+                          className="flex-1"
+                        />
+                        <Button 
+                          onClick={async () => {
+                            if (!threadMsgInput.trim() || !selectedThread) return;
+                            const { error } = await supabase.from('message_threads').insert({
+                              session_id: selectedThread,
+                              sender_type: 'admin',
+                              message: threadMsgInput.trim(),
+                              notification_type: 'info',
+                              can_reply: true,
+                            });
+                            if (!error) {
+                              setThreadMsgInput('');
+                              fetchThreadMessages(selectedThread);
+                              fetchActiveChats();
+                            }
+                          }}
+                          disabled={!threadMsgInput.trim()}
+                        >
+                          Send
+                        </Button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </Card>
             </div>
           )}
         </TabsContent>
 
-        {/* Message Thread Dialog */}
-        <Dialog open={!!selectedThread} onOpenChange={(open) => !open && setSelectedThread(null)}>
-          <DialogContent className="sm:max-w-[500px] max-h-[80vh]">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <MessageSquare className="h-5 w-5" />
-                Conversation Thread
-              </DialogTitle>
-              <DialogDescription>
-                Viewing message history with player
-              </DialogDescription>
-            </DialogHeader>
-            <div className="py-4 max-h-[50vh] overflow-y-auto space-y-3">
-              {threadMessages.length === 0 ? (
-                <p className="text-center text-muted-foreground text-sm">No messages</p>
-              ) : (
-                threadMessages.map((msg) => (
-                  <div 
-                    key={msg.id} 
-                    className={`flex ${msg.sender_type === 'admin' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div 
-                      className={`max-w-[80%] rounded-lg p-3 text-sm ${
-                        msg.sender_type === 'admin' 
-                          ? 'bg-primary text-primary-foreground rounded-br-none' 
-                          : 'bg-muted rounded-bl-none'
-                      }`}
-                    >
-                      <p className="font-medium text-[10px] opacity-80 mb-1">
-                        {msg.sender_type === 'admin' ? 'You (Admin)' : 'Player'}
-                      </p>
-                      <p>{msg.message}</p>
-                      <p className="text-[9px] opacity-60 mt-1 text-right">
-                        {new Date(msg.created_at).toLocaleTimeString()}
-                      </p>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-            <div className="flex gap-2 pt-2 border-t">
-              <Input
-                placeholder="Type a reply..."
-                value={msgInput}
-                onChange={(e) => setMsgInput(e.target.value)}
-                onKeyDown={async (e) => {
-                  if (e.key === 'Enter' && msgInput.trim() && selectedThread) {
-                    const { error } = await supabase.from('message_threads').insert({
-                      session_id: selectedThread,
-                      sender_type: 'admin',
-                      message: msgInput.trim(),
-                      notification_type: 'info',
-                      can_reply: true,
-                    });
-                    if (!error) {
-                      setMsgInput('');
-                      fetchThreadMessages(selectedThread);
-                      fetchActiveChats();
-                    }
-                  }
-                }}
-                className="flex-1"
-              />
-              <Button 
-                onClick={async () => {
-                  if (!msgInput.trim() || !selectedThread) return;
-                  const { error } = await supabase.from('message_threads').insert({
-                    session_id: selectedThread,
-                    sender_type: 'admin',
-                    message: msgInput.trim(),
-                    notification_type: 'info',
-                    can_reply: true,
-                  });
-                  if (!error) {
-                    setMsgInput('');
-                    fetchThreadMessages(selectedThread);
-                    fetchActiveChats();
-                  }
-                }}
-                disabled={!msgInput.trim()}
-              >
-                Send
-              </Button>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setSelectedThread(null)}>Close</Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
       </Tabs>
     </div>
   );
