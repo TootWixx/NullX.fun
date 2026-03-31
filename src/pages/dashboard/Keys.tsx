@@ -20,6 +20,7 @@ interface LicenseKey {
   max_uses: number;
   current_uses: number;
   expires_at: string | null;
+  expires_after_seconds?: number | null; // Duration stored for activation on first use
   is_active: boolean;
   created_at: string;
 }
@@ -53,10 +54,18 @@ export default function Keys() {
   const [note, setNote] = useState('');
   const [maxUses, setMaxUses] = useState('1');
   const [expiresIn, setExpiresIn] = useState('');
+  const [expireUnit, setExpireUnit] = useState('days');
   const [batchCount, setBatchCount] = useState('1');
   const [saving, setSaving] = useState(false);
   const [filterProject, setFilterProject] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  
+  // Extension State
+  const [extendDialogOpen, setExtendDialogOpen] = useState(false);
+  const [extendingKey, setExtendingKey] = useState<LicenseKey | null>(null);
+  const [extendTimeValue, setExtendTimeValue] = useState('1');
+  const [extendTimeUnit, setExtendTimeUnit] = useState('hours');
+  
   const isStarter = !subscribed && !isAdmin;
   const starterGeneratedCount = keys.length;
   const starterRemaining = Math.max(0, 60 - starterGeneratedCount);
@@ -101,7 +110,8 @@ export default function Keys() {
       });
       return;
     }
-    const expiresAt = expiresIn ? new Date(Date.now() + parseInt(expiresIn) * 86400000).toISOString() : null;
+    const multiplier = expireUnit === 'hours' ? 3600000 : 86400000;
+    const expiresAfterSeconds = expiresIn ? parseInt(expiresIn) * (expireUnit === 'hours' ? 3600 : 86400) : null;
 
     const rows = Array.from({ length: count }, () => ({
       project_id: selectedProject,
@@ -109,7 +119,8 @@ export default function Keys() {
       key_value: count === 1 ? keyValue : generateKey(),
       note: note.trim() || null,
       max_uses: parseInt(maxUses) || 1,
-      expires_at: expiresAt,
+      expires_at: null, // Don't set expiration until first use
+      expires_after_seconds: expiresAfterSeconds, // Store duration for later
     }));
 
     const { error } = await supabase.from('license_keys').insert(rows);
@@ -124,7 +135,12 @@ export default function Keys() {
   };
 
   const deleteKey = async (id: string) => {
-    await supabase.from('license_keys').delete().eq('id', id);
+    const { error } = await supabase.from('license_keys').delete().eq('id', id);
+    if (error) {
+      toast({ title: 'Error deleting key', description: error.message, variant: 'destructive' });
+      return;
+    }
+    toast({ title: 'Key deleted from database' });
     fetchData();
   };
 
@@ -133,16 +149,48 @@ export default function Keys() {
     if (!ids.length) return;
     const { error } = await supabase.from('license_keys').delete().in('id', ids);
     if (error) {
-      toast({ title: 'Error', description: error.message, variant: 'destructive' });
+      toast({ title: 'Error deleting keys', description: error.message, variant: 'destructive' });
       return;
     }
-    toast({ title: `Deleted ${ids.length} key(s)` });
+    toast({ title: `Deleted ${ids.length} key(s) from database` });
+    setSelectedIds(new Set());
     fetchData();
   };
 
   const toggleKey = async (key: LicenseKey) => {
     await supabase.from('license_keys').update({ is_active: !key.is_active }).eq('id', key.id);
     fetchData();
+  };
+
+  const openExtendDialog = (key: LicenseKey) => {
+    setExtendingKey(key);
+    setExtendTimeValue('1');
+    setExtendTimeUnit('hours');
+    setExtendDialogOpen(true);
+  };
+
+  const handleExtend = async () => {
+    if (!extendingKey) return;
+    setSaving(true);
+    const multiplier = extendTimeUnit === 'hours' ? 3600000 : 86400000;
+    const addedTime = (parseInt(extendTimeValue) || 1) * multiplier;
+    
+    let baseTime = Date.now();
+    if (extendingKey.expires_at) {
+       const exp = new Date(extendingKey.expires_at).getTime();
+       if (exp > baseTime) baseTime = exp;
+    }
+    
+    const newExpiresAt = new Date(baseTime + addedTime).toISOString();
+    
+    const { error } = await supabase.from('license_keys').update({ expires_at: newExpiresAt }).eq('id', extendingKey.id);
+    setSaving(false);
+    if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
+    else {
+      toast({ title: 'Key extended successfully' });
+      setExtendDialogOpen(false);
+      fetchData();
+    }
   };
 
   const resetHwid = async (id: string) => {
@@ -157,9 +205,21 @@ export default function Keys() {
   };
 
   const getProjectName = (id: string) => projects.find((p) => p.id === id)?.name || 'Unknown';
+  
   const isExpired = (k: LicenseKey) => {
     if (!k.expires_at) return false;
     return new Date(k.expires_at).getTime() < Date.now();
+  };
+  
+  const formatExpires = (k: LicenseKey) => {
+    if (k.expires_at) return new Date(k.expires_at).toLocaleString();
+    if (k.expires_after_seconds) {
+      const hours = Math.floor(k.expires_after_seconds / 3600);
+      const days = Math.floor(hours / 24);
+      if (days > 0) return `Activates on first use (${days}d)`;
+      return `Activates on first use (${hours}h)`;
+    }
+    return 'Never';
   };
   const visibleKeys = filterProject === 'all' ? keys : keys.filter(k => k.project_id === filterProject);
   const allVisibleSelected = visibleKeys.length > 0 && visibleKeys.every(k => selectedIds.has(k.id));
@@ -305,9 +365,10 @@ export default function Keys() {
                     </TableCell>
                     <TableCell className="font-mono text-xs tabular-nums">{key.current_uses}/{key.max_uses}</TableCell>
                     <TableCell className="font-mono text-xs">{key.hwid ? key.hwid.slice(0, 12) + '...' : '—'}</TableCell>
-                    <TableCell className="text-xs">{key.expires_at ? new Date(key.expires_at).toLocaleDateString() : 'Never'}</TableCell>
+                    <TableCell className="text-xs">{formatExpires(key)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">
+                        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => openExtendDialog(key)} title="Extend Expiration">Extend</Button>
                         {key.hwid && (
                           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => resetHwid(key.id)} title="Reset HWID"><RefreshCw className="h-3 w-3" /></Button>
                         )}
@@ -347,8 +408,17 @@ export default function Keys() {
               </div>
             </div>
             <div className="space-y-2">
-              <Label>Expires In (days, leave empty for never)</Label>
-              <Input type="number" min="1" placeholder="e.g. 30" value={expiresIn} onChange={(e) => setExpiresIn(e.target.value)} className="bg-background/50" />
+              <Label>Expires In (leave empty for never)</Label>
+              <div className="flex gap-2">
+                <Input type="number" min="1" placeholder="e.g. 30" value={expiresIn} onChange={(e) => setExpiresIn(e.target.value)} className="bg-background/50 flex-1" />
+                <Select value={expireUnit} onValueChange={setExpireUnit}>
+                  <SelectTrigger className="w-[100px] bg-background/50"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="hours">Hours</SelectItem>
+                    <SelectItem value="days">Days</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
             <div className="space-y-2">
               <Label>Note (optional)</Label>
@@ -367,6 +437,31 @@ export default function Keys() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
             <Button onClick={handleCreate} disabled={saving || !selectedProject}>{saving ? 'Creating...' : 'Generate'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={extendDialogOpen} onOpenChange={setExtendDialogOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Extend Key Expiration</DialogTitle>
+            <DialogDescription>Add more time to this key's expiration date.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-4">
+             <div className="flex gap-2">
+               <Input type="number" min="1" value={extendTimeValue} onChange={(e) => setExtendTimeValue(e.target.value)} className="bg-background/50 flex-1" />
+               <Select value={extendTimeUnit} onValueChange={setExtendTimeUnit}>
+                 <SelectTrigger className="w-[120px] bg-background/50"><SelectValue /></SelectTrigger>
+                 <SelectContent>
+                   <SelectItem value="hours">Hours</SelectItem>
+                   <SelectItem value="days">Days</SelectItem>
+                 </SelectContent>
+               </Select>
+             </div>
+          </div>
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => setExtendDialogOpen(false)}>Cancel</Button>
+            <Button onClick={handleExtend} disabled={saving}>{saving ? 'Saving...' : 'Extend Key'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

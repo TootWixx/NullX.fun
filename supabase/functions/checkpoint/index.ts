@@ -111,15 +111,24 @@ Deno.serve(async (req: Request) => {
 
       if (existingSession) {
         // Reuse existing session — get completions across ALL sessions for this IP+project
-        // Check for ANY existing issued key for this IP + project across all sessions
+        const historicalKey = await getHistoricalKeyStatusForIP(supabase, projectId, existingSession.ip_address);
+        
+        // Prioritize session's own key first, then fall back to historical key
+        const finalKeyVal = existingSession.issued_key || (historicalKey?.status === 'active' ? historicalKey.key_value : null);
+        const finalKeyStatus = (historicalKey?.status === 'expired') ? 'expired' : (finalKeyVal ? 'active' : null);
+        const finalKeyExpires = (historicalKey?.status === 'active') ? historicalKey.expires_at : null;
+
+        if (finalKeyStatus === 'expired') {
+           return jsonRes({ success: true, key_expired: true, issued_key: historicalKey?.key_value, all_done: true });
+        }
+
         const { data: ipSessions } = await supabase
           .from("checkpoint_sessions")
-          .select("session_token, issued_key")
+          .select("session_token")
           .eq("project_id", projectId)
           .eq("ip_address", existingSession.ip_address);
 
         const allTokens = (ipSessions || []).map((s: any) => s.session_token);
-        const issuedKey = (ipSessions || []).find((s: any) => s.issued_key)?.issued_key || null;
 
         const { data: completions } = await supabase
           .from("checkpoint_completions")
@@ -127,14 +136,21 @@ Deno.serve(async (req: Request) => {
           .in("session_token", allTokens);
 
         const completedIds = (completions || []).map((c: any) => c.checkpoint_id);
+        const allDoneLocally = !!finalKeyVal || checkpoints.every((cp: any) => completedIds.includes(cp.id));
+
+        // If we found a historical key but the session doesn't have it yet, link it
+        if (finalKeyVal && !existingSession.issued_key) {
+          await supabase.from("checkpoint_sessions").update({ issued_key: finalKeyVal, completed_all: true }).eq("id", existingSession.id);
+        }
 
         return jsonRes({
           success: true,
           session_token: existingSession.session_token,
           resumed: true,
-          completed_ids: completedIds,
-          issued_key: issuedKey,
-          all_done: checkpoints.every((cp: any) => completedIds.includes(cp.id)),
+          completed_ids: !!finalKeyVal ? checkpoints.map((c: any) => c.id) : completedIds,
+          issued_key: finalKeyVal,
+          key_expires_at: finalKeyExpires,
+          all_done: allDoneLocally,
           project_user_id: projectUserId,
           checkpoints: checkpoints.map((c: any) => ({
             id: c.id,
@@ -150,6 +166,13 @@ Deno.serve(async (req: Request) => {
       }
 
       // ──── 2. No existing session — rate limit then create new ────
+      const historicalKey = await getHistoricalKeyStatusForIP(supabase, projectId, clientIP);
+      if (historicalKey?.status === 'expired') {
+          return jsonRes({ success: true, key_expired: true, issued_key: historicalKey.key_value, all_done: true });
+      }
+      const issuedKey = historicalKey?.status === 'active' ? historicalKey.key_value : null;
+      const keyExpiresAt = historicalKey?.status === 'active' ? historicalKey.expires_at : null;
+
       const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
       const { count: recentSessions } = await supabase
         .from("checkpoint_sessions")
@@ -169,6 +192,8 @@ Deno.serve(async (req: Request) => {
         session_token: sessionToken,
         ip_address: clientIP,
         expires_at: expiresAt,
+        issued_key: issuedKey,
+        completed_all: !!issuedKey,
       });
 
       if (insertErr) {
@@ -180,9 +205,10 @@ Deno.serve(async (req: Request) => {
         success: true,
         session_token: sessionToken,
         resumed: false,
-        completed_ids: [],
-        issued_key: null,
-        all_done: false,
+        issued_key: issuedKey,
+        key_expires_at: keyExpiresAt,
+        all_done: !!issuedKey,
+        completed_ids: !!issuedKey ? checkpoints.map((c: any) => c.id) : [],
         project_user_id: projectUserId,
         checkpoints: checkpoints.map((c: any) => ({
           id: c.id,
@@ -216,14 +242,19 @@ Deno.serve(async (req: Request) => {
         return jsonRes({ success: false, error: "Invalid session" }, 404);
       }
 
-      // Check for key across ALL sessions for this IP + project
+      // Check for key: Session first, then IP
+      const historicalKey = await getHistoricalKeyStatusForIP(supabase, session.project_id, session.ip_address);
+      if (historicalKey?.status === 'expired') {
+          return jsonRes({ success: true, key_expired: true, issued_key: historicalKey.key_value, all_done: true });
+      }
+      const issuedKey = session.issued_key || (historicalKey?.status === 'active' ? historicalKey.key_value : null);
+      const keyExpiresAt = (historicalKey?.status === 'active') ? historicalKey.expires_at : null;
+
       const { data: allIpSessions } = await supabase
         .from("checkpoint_sessions")
-        .select("issued_key, session_token")
+        .select("session_token")
         .eq("project_id", session.project_id)
         .eq("ip_address", session.ip_address);
-
-      const issuedKey = (allIpSessions || []).find((s: any) => s.issued_key)?.issued_key || null;
 
       const { data: checkpoints } = await supabase
         .from("checkpoint_configs")
@@ -239,11 +270,11 @@ Deno.serve(async (req: Request) => {
 
       const completedSet = new Set((completions || []).map((c: any) => c.checkpoint_id));
       const activeCPs = checkpoints || [];
-      const missingIds = activeCPs
+      const missingIds = !!issuedKey ? [] : activeCPs
         .filter((cp: any) => !completedSet.has(cp.id))
         .map((cp: any) => cp.id);
       
-      const allDone = activeCPs.length > 0 && missingIds.length === 0;
+      const allDone = (activeCPs.length > 0 && missingIds.length === 0) || !!issuedKey;
 
       // Diagnostic logging
       if (!allDone) {
@@ -255,21 +286,32 @@ Deno.serve(async (req: Request) => {
       if (allDone && !finalIssuedKey) {
         console.log(`[Poll-Claim] Attempting to claim key for project ${session.project_id} during poll`);
         
-        // Find an available key
-        const { data: availableKeys } = await supabase
+        // Find an available key (unused, active, not expired)
+        // SIMPLIFIED: Fetch active keys and filter in code
+        const { data: allKeys, error: keyQueryErr } = await supabase
           .from("license_keys")
-          .select("id, key_value")
+          .select("id, key_value, expires_at, current_uses")
           .eq("project_id", session.project_id)
           .eq("is_active", true)
-          .eq("current_uses", 0)
-          .is("hwid", null)
-          .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
           .order("created_at", { ascending: true })
-          .limit(1);
+          .limit(50);
 
-        const poolKey = availableKeys?.[0];
+        console.log(`[Poll-Claim] Query: allKeys.length=${allKeys?.length || 0}, error=${keyQueryErr?.message || 'none'}`);
+
+        // Filter for available keys in code
+        const availableKeys = (allKeys || []).filter((k: any) => {
+          const isUnused = k.current_uses === 0 || k.current_uses === null;
+          const isNotExpired = !k.expires_at || new Date(k.expires_at).getTime() > Date.now();
+          console.log(`[Poll-Claim] Key ${k.id.slice(0,8)}: uses=${k.current_uses}, unused=${isUnused}, expired=${!isNotExpired}`);
+          return isUnused && isNotExpired;
+        });
+        
+        console.log(`[Poll-Claim] Filtered: ${availableKeys.length} available`);
+        
+        const poolKey = availableKeys[0];
+        console.log(`[Poll-Claim] poolKey:`, poolKey ? poolKey.id.slice(0,8) : 'NONE');
         if (poolKey) {
-          // Attempt to claim atomically
+          // Attempt to claim atomically - SIMPLIFIED
           const { data: claimedKey } = await supabase
             .from("license_keys")
             .update({ 
@@ -277,8 +319,6 @@ Deno.serve(async (req: Request) => {
               note: `Checkpoint key — Reserved via Poll/Retry: ${sessionToken.slice(0, 8)}... (IP: ${clientIP})` 
             })
             .eq("id", poolKey.id)
-            .eq("current_uses", 0)
-            .is("hwid", null)
             .select()
             .single();
 
@@ -305,12 +345,13 @@ Deno.serve(async (req: Request) => {
 
       return jsonRes({
         success: true,
-        completed_ids: Array.from(completedSet),
-        completed: completedSet.size,
+        completed_ids: !!finalIssuedKey ? activeCPs.map((cp:any) => cp.id) : Array.from(completedSet),
+        completed: !!finalIssuedKey ? activeCPs.length : completedSet.size,
         total: activeCPs.length,
         missing_ids: missingIds,
         all_done: allDone,
         issued_key: finalIssuedKey,
+        key_expires_at: keyExpiresAt,
       });
     }
 
@@ -447,38 +488,45 @@ Deno.serve(async (req: Request) => {
       const allDone = allCPs?.every((cp: any) => completedSet.has(cp.id)) ?? false;
 
       // Check if ANY related session already has a key before claiming new one
-      const { data: relatedSessions } = await supabase
-        .from("checkpoint_sessions")
-        .select("issued_key")
-        .eq("project_id", session.project_id)
-        .eq("ip_address", session.ip_address);
-
-      const sessionIssuedKey = session.issued_key || null;
-      const ipIssuedKey = (relatedSessions || []).find((s: any) => s.issued_key)?.issued_key || null;
-      const existingIssuedKey = sessionIssuedKey ?? ipIssuedKey;
+      const historicalKey = await getHistoricalKeyStatusForIP(supabase, session.project_id, session.ip_address);
+      if (historicalKey?.status === 'expired') {
+          return jsonRes({ success: true, key_expired: true, issued_key: historicalKey.key_value, all_done: true });
+      }
+      const existingIssuedKey = session.issued_key || (historicalKey?.status === 'active' ? historicalKey.key_value : null);
+      const keyExpiresAt = (historicalKey?.status === 'active') ? historicalKey.expires_at : null;
 
       if (allDone && !existingIssuedKey) {
-        console.log(`[Claim] Attempting to claim key for project ${session.project_id}`);
+        console.log(`[Claim] START: project=${session.project_id}, ip=${session.ip_address}`);
         
         // Find an available key for this project in the pool
-        const { data: availableKeys, error: poolQueryErr } = await supabase
+        // SIMPLIFIED: Fetch all active keys and filter in code to avoid query issues
+        const { data: allKeys, error: poolQueryErr } = await supabase
           .from("license_keys")
           .select("id, key_value, current_uses, hwid, expires_at, max_uses")
           .eq("project_id", session.project_id)
           .eq("is_active", true)
-          .eq("current_uses", 0)
-          .is("hwid", null)
-          .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
           .order("created_at", { ascending: true })
-          .limit(1);
+          .limit(50);
+
+        console.log(`[Claim] Query result: allKeys.length=${allKeys?.length || 0}, error=${poolQueryErr?.message || 'none'}`);
 
         if (poolQueryErr) {
           console.error(`[Claim] Pool query error:`, poolQueryErr);
           return jsonRes({ success: false, error: "Database error while fetching key pool." }, 500);
         }
 
-        const poolKey = availableKeys?.[0];
-        console.log(`[Claim] Available key:`, poolKey ? "Found" : "NOT FOUND");
+        // Filter for available keys (unused and not expired) in code
+        const availableKeys = (allKeys || []).filter((k: any) => {
+          const isUnused = k.current_uses === 0 || k.current_uses === null;
+          const isNotExpired = !k.expires_at || new Date(k.expires_at).getTime() > Date.now();
+          console.log(`[Claim] Checking key ${k.id.slice(0,8)}: uses=${k.current_uses}, unused=${isUnused}, notExpired=${isNotExpired}`);
+          return isUnused && isNotExpired;
+        });
+        
+        console.log(`[Claim] After filter: ${availableKeys.length} available keys`);
+        
+        const poolKey = availableKeys[0];
+        console.log(`[Claim] Selected poolKey:`, poolKey ? poolKey.id.slice(0,8) : 'NONE');
 
         if (!poolKey) {
           // Diagnostic: Count how many keys EXIST for this project regardless of state
@@ -500,7 +548,7 @@ Deno.serve(async (req: Request) => {
           }, 503);
         }
 
-        // Attempt to claim the key atomically
+        // Attempt to claim the key - SIMPLIFIED: Just update and check result
         console.log(`[Claim] Claiming key id: ${poolKey.id}`);
         const { data: claimedKey, error: claimErr } = await supabase
           .from("license_keys")
@@ -509,8 +557,6 @@ Deno.serve(async (req: Request) => {
             note: `Checkpoint key — Reserved by session: ${session_token.slice(0, 8)}... (IP: ${clientIP})` 
           })
           .eq("id", poolKey.id)
-          .eq("current_uses", 0)
-          .is("hwid", null)
           .select()
           .single();
 
@@ -522,11 +568,11 @@ Deno.serve(async (req: Request) => {
         console.log(`[Claim] Successfully claimed key: ${claimedKey.key_value.slice(0, 4)}...`);
 
         // Update session with the claimed key
+        // NOTE: Always update; if another request already wrote a key, prefer that one
         const { data: sessionUpdated, error: sessionUpdateErr } = await supabase
           .from("checkpoint_sessions")
           .update({ completed_all: true, issued_key: claimedKey.key_value })
           .eq("id", session.id)
-          .is("issued_key", null)
           .select("issued_key")
           .maybeSingle();
 
@@ -536,7 +582,7 @@ Deno.serve(async (req: Request) => {
         }
 
         const finalIssuedKey = sessionUpdated?.issued_key || claimedKey.key_value;
-        return jsonRes({ success: true, all_done: true, key: finalIssuedKey, issued_key: finalIssuedKey });
+        return jsonRes({ success: true, all_done: true, key: finalIssuedKey, issued_key: finalIssuedKey, key_expires_at: claimedKey.expires_at });
       }
 
       return jsonRes({
@@ -544,7 +590,8 @@ Deno.serve(async (req: Request) => {
         all_done: allDone,
         key: existingIssuedKey || session.issued_key || null,
         issued_key: existingIssuedKey || session.issued_key || null,
-        completed: completedSet.size,
+        key_expires_at: keyExpiresAt,
+        completed: !!existingIssuedKey ? allCPs?.length : completedSet.size,
         total: allCPs?.length || 0,
       });
     }
@@ -579,4 +626,51 @@ function generateKey(): string {
     parts.push(seg);
   }
   return parts.join("-");
+}
+
+async function getHistoricalKeyStatusForIP(supabase: any, projectId: string, ipAddress: string): Promise<{ key_value: string, status: 'active' | 'expired', expires_at: string | null } | null> {
+  // 1. Search checkpoint_sessions for keys linked to this IP
+  const { data: ipSessions } = await supabase
+    .from("checkpoint_sessions")
+    .select("issued_key")
+    .eq("project_id", projectId)
+    .eq("ip_address", ipAddress)
+    .not("issued_key", "is", null);
+
+  const sessionKeys = (ipSessions || []).map((s: any) => s.issued_key);
+  
+  // 2. Search license_keys notes for this IP (covers session record desync)
+  // Use a more robust search pattern to avoid IP partial matches
+  const { data: noteKeys } = await supabase
+    .from("license_keys")
+    .select("key_value")
+    .eq("project_id", projectId)
+    .or(`note.ilike.% (IP: ${ipAddress}),note.ilike.% (IP: ::ffff:${ipAddress})`);
+
+  const extraKeys = (noteKeys || []).map((k: any) => k.key_value);
+  const allUniqueKeys = Array.from(new Set([...sessionKeys, ...extraKeys]));
+
+  if (allUniqueKeys.length === 0) return null;
+
+  // 3. Verify the latest state of these keys in license_keys
+  const { data: validKeys } = await supabase
+    .from("license_keys")
+    .select("key_value, is_active, expires_at")
+    .in("key_value", allUniqueKeys)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (validKeys && validKeys.length > 0) {
+    const keyRecord = validKeys[0];
+    const isExpired = keyRecord.expires_at && new Date(keyRecord.expires_at).getTime() < Date.now();
+    const isActive = keyRecord.is_active && !isExpired;
+    
+    return {
+      key_value: keyRecord.key_value,
+      status: isActive ? 'active' : 'expired',
+      expires_at: keyRecord.expires_at
+    };
+  }
+  
+  return null;
 }

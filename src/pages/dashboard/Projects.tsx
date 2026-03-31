@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { Plus, FolderCode, Copy, Trash2, ToggleLeft, ToggleRight, Upload, Lock, KeyRound, Eye, EyeOff, AlertTriangle } from 'lucide-react';
+import { Plus, FolderCode, Copy, Trash2, ToggleLeft, ToggleRight, Upload, Lock, KeyRound, Eye, EyeOff, AlertTriangle, FileCode, Save } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 import {
   generateRecoveryKey,
@@ -70,6 +70,12 @@ export default function Projects() {
   const [viewingProject, setViewingProject] = useState<Project | null>(null);
   const [decryptedContent, setDecryptedContent] = useState('');
   const [showContent, setShowContent] = useState(false);
+
+  // Edit source state
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [editContent, setEditContent] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const fetchProjects = async () => {
     const { data, error } = await supabase
@@ -247,6 +253,65 @@ export default function Projects() {
     }
   };
 
+  const handleEditSource = async (project: Project) => {
+    if (!project.script_content || !project.encryption_iv) {
+      toast({ title: 'No script', description: 'This project has no uploaded script to edit', variant: 'destructive' });
+      return;
+    }
+    if (!unlocked || !sessionKey) {
+      toast({ title: 'Vault locked', description: 'Unlock the vault first to edit sources', variant: 'destructive' });
+      return;
+    }
+    try {
+      const content = await decryptContent(
+        project.encryption_iv,
+        project.script_content,
+        sessionKey,
+        project.encryption_salt || encryptionConfig!.salt
+      );
+      setEditContent(content);
+      setEditingProject(project);
+      setEditDialogOpen(true);
+    } catch {
+      toast({ title: 'Decryption failed', description: 'Could not decrypt with current key', variant: 'destructive' });
+    }
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingProject || !sessionKey || !encryptionConfig) return;
+    
+    setSavingEdit(true);
+    try {
+      // Re-encrypt the edited content
+      const { iv, ciphertext } = await encryptContent(
+        editContent,
+        sessionKey,
+        encryptionConfig.salt
+      );
+
+      const { error } = await supabase
+        .from('projects')
+        .update({
+          script_content: ciphertext,
+          encryption_iv: iv,
+          encryption_salt: encryptionConfig.salt,
+        })
+        .eq('id', editingProject.id);
+
+      if (error) throw error;
+      
+      toast({ title: 'Source updated', description: 'Your script has been saved. Re-obfuscate to update the protected version.' });
+      setEditDialogOpen(false);
+      setEditingProject(null);
+      setEditContent('');
+      fetchProjects();
+    } catch (err: any) {
+      toast({ title: 'Error saving', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   const toggleActive = async (project: Project) => {
     const { error } = await supabase.from('projects').update({ is_active: !project.is_active }).eq('id', project.id);
     if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
@@ -350,9 +415,14 @@ export default function Projects() {
                     </div>
                     <div className="flex items-center gap-1 flex-wrap">
                       {project.script_content && (
-                        <Button variant="ghost" size="sm" onClick={() => handleViewSource(project)} className="text-xs">
-                          <Eye className="h-3.5 w-3.5 mr-1" /> View Source
-                        </Button>
+                        <>
+                          <Button variant="ghost" size="sm" onClick={() => handleViewSource(project)} className="text-xs">
+                            <Eye className="h-3.5 w-3.5 mr-1" /> View
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => handleEditSource(project)} className="text-xs">
+                            <FileCode className="h-3.5 w-3.5 mr-1" /> Edit
+                          </Button>
+                        </>
                       )}
                       <Button variant="ghost" size="sm" onClick={() => toggleActive(project)} className="text-xs">
                         {project.is_active ? <ToggleRight className="h-3.5 w-3.5 mr-1" /> : <ToggleLeft className="h-3.5 w-3.5 mr-1" />}
@@ -500,6 +570,39 @@ export default function Projects() {
               </div>
             )}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Source Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={(open) => { 
+        setEditDialogOpen(open); 
+        if (!open) { 
+          setEditingProject(null); 
+          setEditContent(''); 
+        } 
+      }}>
+        <DialogContent className="max-w-3xl max-h-[90vh]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileCode className="h-5 w-5" />
+              Edit {editingProject?.name}
+            </DialogTitle>
+            <DialogDescription>Edit your script source code. Save to update the encrypted store. You'll need to re-obfuscate to update the protected version.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <textarea
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              className="w-full h-[400px] rounded-lg bg-muted p-4 font-mono text-xs resize-none focus:outline-none focus:ring-2 focus:ring-primary/50"
+              spellCheck={false}
+            />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>Cancel</Button>
+            <Button onClick={handleSaveEdit} disabled={savingEdit} className="gap-1">
+              {savingEdit ? 'Saving...' : <><Save className="h-4 w-4" /> Save Changes</>}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

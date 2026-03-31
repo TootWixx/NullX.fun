@@ -28,7 +28,7 @@ interface ActiveSession {
   ip_address: string | null;
   os: string | null;
   last_ping: string;
-  status: 'active' | 'killed';
+  status: 'active' | 'killed' | 'disconnected';
   message: string | null;
   created_at: string;
   license_keys?: { key_value: string };
@@ -61,12 +61,18 @@ export default function Logs() {
     if (projRes.data) setProjects(projRes.data);
     
     if (activeRes.data) {
-      // Show sessions active in the last 10 minutes to be safe
-      const threshold = Date.now() - 10 * 60 * 1000;
-      const validSessions = (activeRes.data as any[]).filter(s => 
-        new Date(s.last_ping).getTime() > threshold || s.status === 'killed'
-      );
-      setActiveSessions(validSessions);
+      // Mark sessions older than 2 minutes as stale/disconnected
+      const staleThreshold = Date.now() - 2 * 60 * 1000;
+      const processedSessions = (activeRes.data as any[]).map(s => {
+        const lastPingTime = new Date(s.last_ping).getTime();
+        const isStale = lastPingTime < staleThreshold;
+        // If stale and was active, mark as disconnected
+        if (isStale && s.status === 'active') {
+          return { ...s, status: 'disconnected' };
+        }
+        return s;
+      });
+      setActiveSessions(processedSessions);
     } else if (activeRes.error) {
       console.error("Error fetching active sessions:", activeRes.error);
     }
@@ -83,28 +89,53 @@ export default function Logs() {
 
   const handleKill = async () => {
     if (!selectedKillSession) return;
+    
+    // Store kick message in message_threads for custom UI notification
+    const { error: msgError } = await supabase.from('message_threads').insert({
+      session_id: selectedKillSession,
+      sender_type: 'admin',
+      message: killReason.trim(),
+      notification_type: 'kick',
+      can_reply: false,
+    });
+    
+    if (msgError) console.error('Error storing kick message:', msgError);
+    
     const { error } = await supabase.from('active_sessions').update({ 
       status: 'killed',
-      message: killReason.trim()
+      kick_reason: killReason.trim()
     }).eq('id', selectedKillSession);
     
     if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
     else {
-      toast({ title: 'Session Terminated', description: 'User will be kicked on next heartbeat with your reason.' });
+      toast({ title: 'Session Terminated', description: 'User will see a custom kick notification on next heartbeat.' });
       setSelectedKillSession(null);
       setKillReason('Your session has been terminated by the administrator.');
       fetchData();
     }
   };
 
-  const handleSendMessage = async () => {
+  const handleSendMessage = async (allowReply = false) => {
     if (!selectedSession || !msgInput.trim()) return;
-    const { error } = await supabase.from('active_sessions').update({ message: msgInput.trim() }).eq('id', selectedSession);
+    
+    // Store in message_threads for custom notification system
+    const { error } = await supabase.from('message_threads').insert({
+      session_id: selectedSession,
+      sender_type: 'admin',
+      message: msgInput.trim(),
+      notification_type: 'info',
+      can_reply: allowReply,
+    });
+    
     if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
     else {
-      toast({ title: 'Message Queued', description: 'Message will be delivered on next heartbeat.' });
+      toast({ 
+        title: 'Message Sent', 
+        description: allowReply ? 'User can reply to this message.' : 'Message will appear as a custom notification.'
+      });
       setMsgInput('');
       setSelectedSession(null);
+      fetchData();
     }
   };
 
@@ -139,10 +170,32 @@ export default function Logs() {
   };
 
   const eventColors: Record<string, string> = {
-    key_auth: 'text-primary',
-    key_failed: 'text-destructive',
-    hwid_locked: 'text-yellow-500',
-    key_expired: 'text-orange-500',
+    key_auth: 'text-green-600 bg-green-100 border-green-200',
+    key_failed: 'text-destructive bg-red-100 border-red-200',
+    hwid_locked: 'text-yellow-600 bg-yellow-100 border-yellow-200',
+    key_expired: 'text-orange-600 bg-orange-100 border-orange-200',
+    hwid_mismatch: 'text-red-600 bg-red-100 border-red-200',
+  };
+
+  const eventIcons: Record<string, string> = {
+    key_auth: '✅',
+    key_failed: '❌',
+    hwid_locked: '🔒',
+    key_expired: '⏰',
+    hwid_mismatch: '⚠️',
+  };
+
+  const formatDetails = (details: any) => {
+    if (!details || Object.keys(details).length === 0) return null;
+    
+    const parts = [];
+    if (details.roblox_username) parts.push(`👤 ${details.roblox_username}`);
+    if (details.roblox_age) parts.push(`📅 ${details.roblox_age} days`);
+    if (details.roblox_user_id) parts.push(`🆔 ${details.roblox_user_id}`);
+    if (details.reason) parts.push(`❓ ${details.reason}`);
+    if (details.expected) parts.push(`Expected: ${details.expected.slice(0, 8)}...`);
+    
+    return parts.length > 0 ? parts.join(' • ') : JSON.stringify(details).slice(0, 60);
   };
 
   if (loading) return <div className="animate-pulse text-muted-foreground">Loading activity...</div>;
@@ -200,11 +253,11 @@ export default function Logs() {
                 <Table>
                   <TableHeader className="bg-muted/50">
                     <TableRow>
-                      <TableHead className="w-[180px]">Time</TableHead>
+                      <TableHead className="w-[160px]">Time</TableHead>
                       <TableHead>Event</TableHead>
                       <TableHead>Project</TableHead>
-                      <TableHead>IP / HWID</TableHead>
-                      <TableHead>Details</TableHead>
+                      <TableHead>Player Info</TableHead>
+                      <TableHead>Technical</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -214,19 +267,28 @@ export default function Logs() {
                           {new Date(log.created_at).toLocaleString()}
                         </TableCell>
                         <TableCell>
-                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-background border ${eventColors[log.event_type] || 'text-foreground'}`}>
-                            {log.event_type.replace('_', ' ')}
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md border ${eventColors[log.event_type] || 'text-foreground bg-muted border-border'}`}>
+                            {eventIcons[log.event_type] || '•'} {log.event_type.replace(/_/g, ' ')}
                           </span>
                         </TableCell>
                         <TableCell className="text-xs font-medium">{getProjectName(log.project_id)}</TableCell>
                         <TableCell>
-                           <div className="space-y-0.5">
-                             <p className="font-mono text-[10px] text-foreground/80">{log.ip_address || '—'}</p>
-                             <p className="font-mono text-[9px] text-muted-foreground truncate max-w-[120px]">{log.hwid || '—'}</p>
-                           </div>
+                          {log.details?.roblox_username ? (
+                            <div className="space-y-0.5">
+                              <p className="text-xs font-medium text-foreground">👤 {log.details.roblox_username}</p>
+                              {log.details.roblox_age && (
+                                <p className="text-[10px] text-muted-foreground">📅 {log.details.roblox_age} days old</p>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-muted-foreground italic">No player data</span>
+                          )}
                         </TableCell>
-                        <TableCell className="text-[10px] text-muted-foreground max-w-[200px] truncate">
-                          {log.details ? JSON.stringify(log.details) : '—'}
+                        <TableCell>
+                           <div className="space-y-0.5">
+                             <p className="font-mono text-[10px] text-foreground/80" title={log.ip_address || undefined}>{log.ip_address?.slice(0, 15) || '—'}</p>
+                             <p className="font-mono text-[9px] text-muted-foreground truncate max-w-[100px]" title={log.hwid || undefined}>{log.hwid ? log.hwid.slice(0, 8) + '...' : '—'}</p>
+                           </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -248,8 +310,13 @@ export default function Logs() {
             </Card>
           ) : (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {filteredSessions.map((session) => (
-                <Card key={session.id} className={`overflow-hidden transition-all border-l-4 ${session.status === 'killed' ? 'border-l-destructive grayscale opacity-60' : 'border-l-primary shadow-sm hover:shadow-md'}`}>
+              {filteredSessions.map((session) => {
+                const isDisconnected = session.status === 'disconnected';
+                const isKilled = session.status === 'killed';
+                const secondsSincePing = Math.floor((Date.now() - new Date(session.last_ping).getTime()) / 1000);
+                
+                return (
+                <Card key={session.id} className={`overflow-hidden transition-all border-l-4 ${isKilled ? 'border-l-destructive grayscale opacity-60' : isDisconnected ? 'border-l-yellow-500 opacity-75' : 'border-l-primary shadow-sm hover:shadow-md'}`}>
                    <CardHeader className="pb-2 pt-4 px-4 flex flex-row items-start justify-between space-y-0">
                      <div className="space-y-1">
                        <CardTitle className="text-sm font-bold flex items-center gap-2">
@@ -257,14 +324,20 @@ export default function Logs() {
                          {session.license_keys?.key_value || 'Unknown Key'}
                        </CardTitle>
                        <CardDescription className="text-[11px] flex items-center gap-2">
-                         <span className="inline-flex h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                         Active in {getProjectName(session.project_id)}
+                         {isKilled ? (
+                           <span className="inline-flex h-2 w-2 rounded-full bg-destructive" />
+                         ) : isDisconnected ? (
+                           <span className="inline-flex h-2 w-2 rounded-full bg-yellow-500" />
+                         ) : (
+                           <span className="inline-flex h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                         )}
+                         {isKilled ? 'Killed' : isDisconnected ? 'Disconnected' : 'Active'} in {getProjectName(session.project_id)}
                        </CardDescription>
                      </div>
                      <div className="flex items-center gap-1">
                         <Dialog open={selectedKillSession === session.id} onOpenChange={(open) => setSelectedKillSession(open ? session.id : null)}>
                           <DialogTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:bg-destructive/10" disabled={session.status === 'killed'} title="Kill Session">
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:bg-destructive/10" disabled={isKilled || isDisconnected} title="Kill Session">
                               <Skull className="h-3.5 w-3.5" />
                             </Button>
                           </DialogTrigger>
@@ -275,7 +348,7 @@ export default function Logs() {
                                 Terminate Session
                               </DialogTitle>
                               <DialogDescription>
-                                Provide a reason for termination. This will be displayed on the player's kick screen.
+                                Provide a reason for termination. This will be displayed as a custom kick notification on the player's screen.
                               </DialogDescription>
                             </DialogHeader>
                             <div className="py-4">
@@ -302,27 +375,44 @@ export default function Logs() {
                           </DialogTrigger>
                           <DialogContent className="sm:max-w-[425px]">
                             <DialogHeader>
-                              <DialogTitle>Send Live Message</DialogTitle>
+                              <DialogTitle>Send Custom Notification</DialogTitle>
                               <DialogDescription>
-                                This message will appear as a Roblox system notification on the player's screen during their next heartbeat.
+                                This will appear as a custom UI notification on the player's screen. They can click to reply if you enable replies.
                               </DialogDescription>
                             </DialogHeader>
-                            <div className="py-4">
+                            <div className="py-4 space-y-3">
                               <Input
                                 placeholder="Enter message to display..."
                                 value={msgInput}
                                 onChange={(e) => setMsgInput(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
                                 className="bg-background/50"
                               />
+                              <div className="flex items-center gap-2">
+                                <input 
+                                  type="checkbox" 
+                                  id={`allow-reply-${session.id}`}
+                                  className="rounded"
+                                />
+                                <Label htmlFor={`allow-reply-${session.id}`} className="text-sm cursor-pointer">
+                                  Allow user to reply
+                                </Label>
+                              </div>
                             </div>
                             <DialogFooter>
                               <Button variant="outline" onClick={() => setSelectedSession(null)}>Cancel</Button>
-                              <Button onClick={handleSendMessage} disabled={!msgInput.trim()}>Send Message</Button>
+                              <Button 
+                                onClick={() => {
+                                  const allowReply = (document.getElementById(`allow-reply-${session.id}`) as HTMLInputElement)?.checked || false;
+                                  handleSendMessage(allowReply);
+                                }} 
+                                disabled={!msgInput.trim()}
+                              >
+                                Send Notification
+                              </Button>
                             </DialogFooter>
                           </DialogContent>
                         </Dialog>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:bg-muted/50" onClick={() => handleDeleteSession(session.id)} title="Clear Session Record">
+                        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:bg-muted/50" onClick={() => handleDeleteSession(session.id)} disabled={isDisconnected} title="Clear Session Record">
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
                      </div>
@@ -340,14 +430,22 @@ export default function Logs() {
                      </div>
                      <div className="pt-1.5 border-t border-border/50">
                         <p className="text-muted-foreground uppercase font-bold text-[9px] tracking-wide">Last Ping</p>
-                        <p className="font-mono text-[10px] text-foreground/80">{Math.floor((Date.now() - new Date(session.last_ping).getTime()) / 1000)}s ago</p>
+                        <p className={`font-mono text-[10px] ${secondsSincePing > 120 ? 'text-yellow-500' : 'text-foreground/80'}`}>
+                          {secondsSincePing > 60 ? `${Math.floor(secondsSincePing / 60)}m ago` : `${secondsSincePing}s ago`}
+                          {isDisconnected && ' (Disconnected)'}
+                        </p>
                      </div>
-                     {session.status === 'killed' && (
+                     {isKilled && (
                        <p className="text-[10px] text-destructive font-bold flex items-center gap-1.5 pt-1">
                          <Skull className="h-3 w-3" /> SESSION TERMINATED
                        </p>
                      )}
-                     {session.message && (
+                     {isDisconnected && (
+                       <p className="text-[10px] text-yellow-500 font-bold flex items-center gap-1.5 pt-1">
+                         <span className="h-2 w-2 rounded-full bg-yellow-500" /> PLAYER LEFT GAME
+                       </p>
+                     )}
+                     {session.message && !isDisconnected && (
                        <div className="rounded border bg-primary/5 p-2 text-[10px] text-primary/80 flex items-start gap-2">
                          <MessageSquare className="h-3 w-3 shrink-0 mt-0.5" />
                          <span className="italic">"{session.message}" (pending delivery...)</span>
@@ -355,7 +453,8 @@ export default function Logs() {
                      )}
                    </CardContent>
                 </Card>
-              ))}
+                );
+              })}
             </div>
           )}
         </TabsContent>

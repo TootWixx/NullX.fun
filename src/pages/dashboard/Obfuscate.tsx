@@ -1018,6 +1018,433 @@ end)
 _NovaWait.Event:Wait()
 
 -- ============================================================
+-- MESSAGING SYSTEM (runs after auth)
+-- ============================================================
+
+local MessageHistory = {}
+local ChatUI = nil
+local FloatingButton = nil
+local NotificationQueue = {}
+
+-- Create ScreenGui for messaging
+local MsgGui = Instance.new("ScreenGui")
+MsgGui.Name = "NullX_Messaging"
+MsgGui.ResetOnSpawn = false
+MsgGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+MsgGui.Parent = game:GetService("CoreGui")
+
+-- Create Notification Card
+local function ShowNotification(data)
+    local notifFrame = Instance.new("Frame")
+    notifFrame.Size = UDim2.new(0, 320, 0, 100)
+    notifFrame.Position = UDim2.new(1, 340, 1, -120)
+    notifFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    notifFrame.BorderSizePixel = 0
+    notifFrame.Parent = MsgGui
+    
+    local corner = Instance.new("UICorner", notifFrame)
+    corner.CornerRadius = UDim.new(0, 12)
+    
+    local stroke = Instance.new("UIStroke", notifFrame)
+    stroke.Color = Color3.fromRGB(147, 112, 219)
+    stroke.Thickness = 2
+    
+    -- Title
+    local title = Instance.new("TextLabel", notifFrame)
+    title.Size = UDim2.new(1, -20, 0, 24)
+    title.Position = UDim2.new(0, 10, 0, 8)
+    title.BackgroundTransparency = 1
+    title.Text = data.title or "📨 Message from Admin"
+    title.TextColor3 = Color3.fromRGB(147, 112, 219)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 14
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- Message preview
+    local preview = Instance.new("TextLabel", notifFrame)
+    preview.Size = UDim2.new(1, -20, 0, 30)
+    preview.Position = UDim2.new(0, 10, 0, 32)
+    preview.BackgroundTransparency = 1
+    preview.Text = data.message:sub(1, 60) .. (data.message:len() > 60 and "..." or "")
+    preview.TextColor3 = Color3.fromRGB(255, 255, 255)
+    preview.Font = Enum.Font.Gotham
+    preview.TextSize = 12
+    preview.TextWrapped = true
+    preview.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- Click to Respond button
+    local respondBtn = Instance.new("TextButton", notifFrame)
+    respondBtn.Size = UDim2.new(1, -20, 0, 26)
+    respondBtn.Position = UDim2.new(0, 10, 1, -36)
+    respondBtn.BackgroundColor3 = Color3.fromRGB(147, 112, 219)
+    respondBtn.Text = "💬 Click Me to Respond and Start a Conversation"
+    respondBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    respondBtn.Font = Enum.Font.GothamBold
+    respondBtn.TextSize = 11
+    
+    local btnCorner = Instance.new("UICorner", respondBtn)
+    btnCorner.CornerRadius = UDim.new(0, 6)
+    
+    respondBtn.MouseButton1Click:Connect(function()
+        notifFrame:Destroy()
+        OpenChatWindow()
+    end)
+    
+    -- Slide in animation
+    notifFrame:TweenPosition(UDim2.new(1, -340, 1, -120), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, 0.5)
+    
+    -- Auto dismiss after 15 seconds
+    task.delay(15, function()
+        if notifFrame and notifFrame.Parent then
+            notifFrame:TweenPosition(UDim2.new(1, 340, 1, -120), Enum.EasingDirection.In, Enum.EasingStyle.Quart, 0.5)
+            task.wait(0.5)
+            if notifFrame then notifFrame:Destroy() end
+        end
+    end)
+end
+
+-- Create Chat Window
+local function OpenChatWindow()
+    if ChatUI and ChatUI.Parent then
+        ChatUI.Visible = true
+        return
+    end
+    
+    -- Main chat frame
+    ChatUI = Instance.new("Frame")
+    ChatUI.Name = "NullX_ChatWindow"
+    ChatUI.Size = UDim2.new(0, 350, 0, 450)
+    ChatUI.Position = UDim2.new(1, -370, 1, -470)
+    ChatUI.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    ChatUI.BorderSizePixel = 0
+    ChatUI.Parent = MsgGui
+    
+    local corner = Instance.new("UICorner", ChatUI)
+    corner.CornerRadius = UDim.new(0, 16)
+    
+    local stroke = Instance.new("UIStroke", ChatUI)
+    stroke.Color = Color3.fromRGB(147, 112, 219)
+    stroke.Thickness = 2
+    
+    -- Header (draggable area)
+    local header = Instance.new("Frame", ChatUI)
+    header.Name = "Header"
+    header.Size = UDim2.new(1, 0, 0, 40)
+    header.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+    header.BorderSizePixel = 0
+    
+    local headerCorner = Instance.new("UICorner", header)
+    headerCorner.CornerRadius = UDim.new(0, 16)
+    
+    -- Fix corner for header bottom
+    local headerFix = Instance.new("Frame", header)
+    headerFix.Size = UDim2.new(1, 0, 0.5, 0)
+    headerFix.Position = UDim2.new(0, 0, 0.5, 0)
+    headerFix.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+    headerFix.BorderSizePixel = 0
+    
+    -- Title
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -80, 1, 0)
+    title.Position = UDim2.new(0, 15, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "💬 nullx.fun Admin Chat"
+    title.TextColor3 = Color3.fromRGB(147, 112, 219)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 14
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- Minimize button
+    local minBtn = Instance.new("TextButton", header)
+    minBtn.Size = UDim2.new(0, 30, 0, 30)
+    minBtn.Position = UDim2.new(1, -65, 0, 5)
+    minBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    minBtn.Text = "−"
+    minBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.TextSize = 18
+    local minCorner = Instance.new("UICorner", minBtn)
+    minCorner.CornerRadius = UDim.new(0, 6)
+    
+    -- Close button
+    local closeBtn = Instance.new("TextButton", header)
+    closeBtn.Size = UDim2.new(0, 30, 0, 30)
+    closeBtn.Position = UDim2.new(1, -35, 0, 5)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    closeBtn.Text = "×"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 18
+    local closeCorner = Instance.new("UICorner", closeBtn)
+    closeCorner.CornerRadius = UDim.new(0, 6)
+    
+    closeBtn.MouseButton1Click:Connect(function()
+        ChatUI.Visible = false
+        ShowFloatingButton()
+    end)
+    
+    minBtn.MouseButton1Click:Connect(function()
+        ChatUI.Visible = false
+        ShowFloatingButton()
+    end)
+    
+    -- Messages scrolling frame
+    local scroll = Instance.new("ScrollingFrame", ChatUI)
+    scroll.Name = "MessageList"
+    scroll.Size = UDim2.new(1, -20, 1, -100)
+    scroll.Position = UDim2.new(0, 10, 0, 50)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(147, 112, 219)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    
+    local layout = Instance.new("UIListLayout", scroll)
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    
+    -- Input area
+    local inputBg = Instance.new("Frame", ChatUI)
+    inputBg.Size = UDim2.new(1, -20, 0, 40)
+    inputBg.Position = UDim2.new(0, 10, 1, -50)
+    inputBg.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    inputBg.BorderSizePixel = 0
+    local inputCorner = Instance.new("UICorner", inputBg)
+    inputCorner.CornerRadius = UDim.new(0, 20)
+    
+    local inputBox = Instance.new("TextBox", inputBg)
+    inputBox.Name = "MessageInput"
+    inputBox.Size = UDim2.new(1, -70, 1, -10)
+    inputBox.Position = UDim2.new(0, 15, 0, 5)
+    inputBox.BackgroundTransparency = 1
+    inputBox.Text = ""
+    inputBox.PlaceholderText = "Type a message..."
+    inputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    inputBox.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
+    inputBox.Font = Enum.Font.Gotham
+    inputBox.TextSize = 14
+    inputBox.ClearTextOnFocus = false
+    
+    local sendBtn = Instance.new("TextButton", inputBg)
+    sendBtn.Size = UDim2.new(0, 50, 0, 30)
+    sendBtn.Position = UDim2.new(1, -60, 0.5, -15)
+    sendBtn.BackgroundColor3 = Color3.fromRGB(147, 112, 219)
+    sendBtn.Text = "Send"
+    sendBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    sendBtn.Font = Enum.Font.GothamBold
+    sendBtn.TextSize = 12
+    local sendCorner = Instance.new("UICorner", sendBtn)
+    sendCorner.CornerRadius = UDim.new(0, 15)
+    
+    -- Function to add message bubble
+    local function AddMessageBubble(text, isUser, messageId)
+        local bubble = Instance.new("Frame")
+        bubble.Size = UDim2.new(1, 0, 0, 0)
+        bubble.AutomaticSize = Enum.AutomaticSize.Y
+        bubble.BackgroundTransparency = 1
+        bubble.Parent = scroll
+        
+        local inner = Instance.new("Frame", bubble)
+        inner.Size = UDim2.new(0.75, 0, 0, 0)
+        inner.Position = isUser and UDim2.new(1, -10, 0, 0) or UDim2.new(0, 10, 0, 0)
+        inner.AnchorPoint = isUser and Vector2.new(1, 0) or Vector2.new(0, 0)
+        inner.AutomaticSize = Enum.AutomaticSize.Y
+        inner.BackgroundColor3 = isUser and Color3.fromRGB(59, 130, 246) or Color3.fromRGB(147, 112, 219)
+        inner.BorderSizePixel = 0
+        
+        local innerCorner = Instance.new("UICorner", inner)
+        innerCorner.CornerRadius = UDim.new(0, 12)
+        
+        local padding = Instance.new("UIPadding", inner)
+        padding.PaddingLeft = UDim.new(0, 12)
+        padding.PaddingRight = UDim.new(0, 12)
+        padding.PaddingTop = UDim.new(0, 8)
+        padding.PaddingBottom = UDim.new(0, 8)
+        
+        local msgLabel = Instance.new("TextLabel", inner)
+        msgLabel.Size = UDim2.new(1, 0, 0, 0)
+        msgLabel.AutomaticSize = Enum.AutomaticSize.Y
+        msgLabel.BackgroundTransparency = 1
+        msgLabel.Text = text
+        msgLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        msgLabel.Font = Enum.Font.Gotham
+        msgLabel.TextSize = 13
+        msgLabel.TextWrapped = true
+        msgLabel.TextXAlignment = Enum.TextXAlignment.Left
+        
+        task.wait()
+        scroll.CanvasPosition = Vector2.new(0, scroll.AbsoluteCanvasSize.Y)
+    end
+    
+    -- Send message function
+    local function SendMessage()
+        local text = inputBox.Text:gsub("^%s*", ""):gsub("%s*$", "")
+        if text == "" then return end
+        
+        -- Find the message we're replying to (most recent admin message)
+        local replyToId = nil
+        for i = #MessageHistory, 1, -1 do
+            if MessageHistory[i].sender == "admin" and MessageHistory[i].can_reply then
+                replyToId = MessageHistory[i].id
+                break
+            end
+        end
+        
+        -- Add to UI
+        AddMessageBubble(text, true)
+        
+        -- Store locally
+        table.insert(MessageHistory, {
+            sender = "user",
+            message = text,
+            timestamp = os.time()
+        })
+        
+        -- Send to server via heartbeat
+        if replyToId then
+            pcall(function()
+                postJson(HEARTBEAT, {
+                    session_id = _NovaSessionId,
+                    reply_message = text,
+                    reply_to_id = replyToId
+                })
+            end)
+        end
+        
+        inputBox.Text = ""
+    end
+    
+    sendBtn.MouseButton1Click:Connect(SendMessage)
+    inputBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then SendMessage() end
+    end)
+    
+    -- Populate existing messages
+    for _, msg in ipairs(MessageHistory) do
+        AddMessageBubble(msg.message, msg.sender == "user", msg.id)
+    end
+    
+    -- Make draggable
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = ChatUI.Position
+        end
+    end)
+    
+    header.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            ChatUI.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    
+    -- Hide floating button when chat is open
+    if FloatingButton then
+        FloatingButton.Visible = false
+    end
+end
+
+-- Create Floating Toggle Button
+local function ShowFloatingButton()
+    if FloatingButton and FloatingButton.Parent then
+        FloatingButton.Visible = true
+        return
+    end
+    
+    FloatingButton = Instance.new("TextButton")
+    FloatingButton.Name = "NullX_ChatToggle"
+    FloatingButton.Size = UDim2.new(0, 50, 0, 50)
+    FloatingButton.Position = UDim2.new(1, -70, 1, -70)
+    FloatingButton.BackgroundColor3 = Color3.fromRGB(147, 112, 219)
+    FloatingButton.Text = "💬"
+    FloatingButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    FloatingButton.Font = Enum.Font.GothamBold
+    FloatingButton.TextSize = 20
+    FloatingButton.Parent = MsgGui
+    FloatingButton.ZIndex = 10
+    
+    local corner = Instance.new("UICorner", FloatingButton)
+    corner.CornerRadius = UDim.new(1, 0)
+    
+    local stroke = Instance.new("UIStroke", FloatingButton)
+    stroke.Color = Color3.fromRGB(255, 255, 255)
+    stroke.Thickness = 2
+    
+    local shadow = Instance.new("ImageLabel", FloatingButton)
+    shadow.Name = "Shadow"
+    shadow.Size = UDim2.new(1, 8, 1, 8)
+    shadow.Position = UDim2.new(0, -4, 0, -4)
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://13160452137"
+    shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.ImageTransparency = 0.6
+    shadow.ZIndex = 9
+    
+    FloatingButton.MouseButton1Click:Connect(function()
+        FloatingButton.Visible = false
+        OpenChatWindow()
+    end)
+    
+    -- Make draggable
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    
+    FloatingButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = FloatingButton.Position
+        end
+    end)
+    
+    FloatingButton.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            FloatingButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    
+    -- Pulse animation
+    task.spawn(function()
+        while FloatingButton and FloatingButton.Parent do
+            for i = 1, 10 do
+                if not FloatingButton or not FloatingButton.Parent then break end
+                FloatingButton.Size = UDim2.new(0, 50 + i, 0, 50 + i)
+                FloatingButton.Position = UDim2.new(1, -70 - i/2, 1, -70 - i/2)
+                task.wait(0.05)
+            end
+            for i = 10, 1, -1 do
+                if not FloatingButton or not FloatingButton.Parent then break end
+                FloatingButton.Size = UDim2.new(0, 50 + i, 0, 50 + i)
+                FloatingButton.Position = UDim2.new(1, -70 - i/2, 1, -70 - i/2)
+                task.wait(0.05)
+            end
+            task.wait(2)
+        end
+    end)
+end
+
+-- ============================================================
 -- SESSION HEARTBEAT (runs after auth)
 -- ============================================================
 
@@ -1030,10 +1457,41 @@ task.spawn(function()
             if hSuccess and hResponse and hResponse.Body then
                 local hDecoded, hData = pcall(function() return HttpService:JSONDecode(hResponse.Body) end)
                 if hDecoded and hData and hData.success then
+                    -- Handle kick
                     if hData.action == "kill" then
-                        player:Kick("NullX.fun: " .. (hData.message or "Your session has been terminated by the administrator."))
+                        player:Kick("NullX.fun: " .. (hData.notification and hData.notification.message or "Your session has been terminated."))
                         break
-                    elseif hData.message then
+                    end
+                    
+                    -- Handle multiple notifications
+                    if hData.notifications and #hData.notifications > 0 then
+                        for _, notif in ipairs(hData.notifications) do
+                            table.insert(MessageHistory, {
+                                id = notif.id,
+                                sender = "admin",
+                                message = notif.message,
+                                timestamp = notif.timestamp,
+                                can_reply = notif.can_reply
+                            })
+                            ShowNotification(notif)
+                            ShowFloatingButton()
+                        end
+                    end
+                    
+                    -- Handle single notification (legacy/compat)
+                    if hData.notification and not hData.notifications then
+                        table.insert(MessageHistory, {
+                            sender = "admin",
+                            message = hData.notification.message,
+                            timestamp = os.time(),
+                            can_reply = hData.notification.can_reply
+                        })
+                        ShowNotification(hData.notification)
+                        ShowFloatingButton()
+                    end
+                    
+                    -- Legacy message support
+                    if hData.message and not hData.notification then
                         game:GetService("StarterGui"):SetCore("SendNotification", {
                             Title = "NullX.fun",
                             Text = hData.message,

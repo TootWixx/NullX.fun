@@ -15,9 +15,35 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
-    await cleanupExpiredLockedKeys(supabase);
 
-    const { key, panel_key, project_id, hwid, os } = await req.json();
+    const url = new URL(req.url);
+    let key = "";
+    let panel_key = "";
+    let project_id = "";
+    let hwid = "";
+    let os = "Unknown";
+
+    if (req.method === "POST") {
+      try {
+        const body = await req.json();
+        key = body.key || "";
+        panel_key = body.panel_key || "";
+        project_id = body.project_id || "";
+        hwid = body.hwid || "";
+        os = body.os || "Unknown";
+      } catch {
+        // Fallback to query params if JSON fails
+        key = url.searchParams.get("key") || "";
+        panel_key = url.searchParams.get("panel_key") || "";
+        project_id = url.searchParams.get("project_id") || "";
+        hwid = url.searchParams.get("hwid") || "";
+      }
+    } else {
+      key = url.searchParams.get("key") || "";
+      panel_key = url.searchParams.get("panel_key") || "";
+      project_id = url.searchParams.get("project_id") || "";
+      hwid = url.searchParams.get("hwid") || "";
+    }
 
     if (!panel_key || typeof panel_key !== "string" || panel_key.length > 96) {
       return new Response(
@@ -26,12 +52,13 @@ Deno.serve(async (req) => {
       );
     }
 
-    if (!key || typeof key !== "string" || key.length > 50) {
+    if (!key || typeof key !== "string" || key.trim().length === 0 || key.trim().length > 50) {
       return new Response(
         JSON.stringify({ success: false, error: "Invalid key format" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+    const trimmedKey = key.trim();
 
     const ip = getIP(req);
 
@@ -51,7 +78,7 @@ Deno.serve(async (req) => {
     const { data: keyCandidates, error: keyListError } = await supabase
       .from("license_keys")
       .select("*, projects(*)")
-      .eq("key_value", key);
+      .eq("key_value", trimmedKey);
 
     const keyData = keyCandidates?.find(
       (row: { projects?: { user_id?: string } | null }) =>
@@ -66,7 +93,7 @@ Deno.serve(async (req) => {
       );
     }
     if (!keyData) {
-      await logEvent(supabase, null, null, "key_failed", ip, hwid, { key, reason: "not_found" });
+      await logEvent(supabase, null, null, "key_failed", ip, hwid, { key: trimmedKey, reason: "not_found" });
       return new Response(
         JSON.stringify({ success: false, error: "Invalid key" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -147,8 +174,33 @@ Deno.serve(async (req) => {
     // increment uses (remembered reload).
     const updates: Record<string, any> = {};
     if (shouldIncrementUses) updates.current_uses = nextUses;
+    
     if (hwid && !keyData.hwid) {
+      // STRICT CONCURRENCY LIMIT: Make sure this HWID does not EVER have another key for this project
+      const { data: existingKeys } = await supabase
+        .from("license_keys")
+        .select("id")
+        .eq("project_id", keyData.project_id)
+        .eq("hwid", hwid)
+        .limit(1);
+
+      if (existingKeys && existingKeys.length > 0) {
+        await logEvent(supabase, keyData.project_id, keyData.id, "key_failed", ip, hwid, { reason: "hwid_limit_reached" });
+        return new Response(
+          JSON.stringify({ success: false, error: "You already own a key for this script. If it is expired, join the Discord to extend it!" }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       updates.hwid = hwid;
+      
+      // FIRST USE: Set expiration timer if duration is configured
+      if (keyData.expires_after_seconds && !keyData.expires_at) {
+        const expiresAt = new Date(Date.now() + keyData.expires_after_seconds * 1000).toISOString();
+        updates.expires_at = expiresAt;
+        console.log(`[Validate] First use - setting expires_at to ${expiresAt} (${keyData.expires_after_seconds}s duration)`);
+      }
+      
       await logEvent(supabase, keyData.project_id, keyData.id, "hwid_locked", ip, hwid, {});
     }
 
@@ -311,17 +363,4 @@ async function sendWebhook(
 
 function formatUses(currentUses: number, maxUses: number | null) {
   return maxUses === null ? `${currentUses}/∞` : `${currentUses}/${maxUses}`;
-}
-
-async function cleanupExpiredLockedKeys(supabase: any) {
-  try {
-    await supabase
-      .from("license_keys")
-      .delete()
-      .eq("is_active", true)
-      .not("hwid", "is", null)
-      .lt("expires_at", new Date().toISOString());
-  } catch (e) {
-    console.error("cleanupExpiredLockedKeys error:", e);
-  }
 }

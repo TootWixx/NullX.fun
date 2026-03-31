@@ -42,8 +42,7 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
-    await cleanupExpiredLockedKeys(supabase);
-
+    
     const url = new URL(req.url);
 
     // Mode 1: Serve obfuscated script by ID (loadstring style)
@@ -89,6 +88,9 @@ Deno.serve(async (req) => {
     let key = "";
     let panelKey = "";
     let hwid = "";
+    let robloxUser: string | null = null;
+    let robloxAge: number | null = null;
+    let robloxId: string | null = null;
 
     if (req.method === "GET") {
       panelKey = url.searchParams.get("panel_key") || "";
@@ -99,6 +101,10 @@ Deno.serve(async (req) => {
       panelKey = body.panel_key || "";
       key = body.key || "";
       hwid = body.hwid || "";
+      // Capture Roblox user info from client
+      robloxUser = body.roblox_username || body.player_name || null;
+      robloxAge = body.account_age || body.roblox_age || null;
+      robloxId = body.roblox_user_id || body.user_id || null;
     }
 
     if (!panelKey || typeof panelKey !== "string" || panelKey.length > 96) {
@@ -193,18 +199,49 @@ Deno.serve(async (req) => {
 
     const updates: Record<string, unknown> = { current_uses: keyData.current_uses + 1 };
     if (hwid && !keyData.hwid) {
+      // STRICT CONCURRENCY LIMIT: Make sure this HWID does not EVER have another key for this project
+      const { data: existingKeys } = await supabase
+        .from("license_keys")
+        .select("id")
+        .eq("project_id", keyData.project_id)
+        .eq("hwid", hwid)
+        .limit(1);
+
+      if (existingKeys && existingKeys.length > 0) {
+        await logEvent(supabase, keyData.project_id, keyData.id, "key_failed", getIP(req), hwid, { reason: "hwid_limit_reached" });
+        return new Response("-- ERROR: You already own a key for this script. If it is expired, join the Discord to extend it!", {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "text/plain" },
+        });
+      }
+
       updates.hwid = hwid;
       await logEvent(supabase, keyData.project_id, keyData.id, "hwid_locked", getIP(req), hwid, {});
     }
 
     await supabase.from("license_keys").update(updates).eq("id", keyData.id);
-    await logEvent(supabase, keyData.project_id, keyData.id, "key_auth", getIP(req), hwid, {});
+    await logEvent(supabase, keyData.project_id, keyData.id, "key_auth", getIP(req), hwid, { 
+      roblox_username: robloxUser, 
+      roblox_age: robloxAge,
+      roblox_user_id: robloxId 
+    });
+
+    // Fetch project name for webhook
+    const { data: projectData } = await supabase
+      .from("projects")
+      .select("name")
+      .eq("id", keyData.project_id)
+      .maybeSingle();
 
     await sendWebhook(supabase, keyData.project_id, "key_auth", {
       key: keyData.key_value,
       hwid: hwid || "none",
       ip: getIP(req),
       uses: formatUses(keyData.current_uses + 1, keyData.max_uses),
+      project_name: projectData?.name || "Unknown Project",
+      roblox_username: robloxUser || "Unknown",
+      roblox_age: robloxAge ? `${robloxAge} days` : "Unknown",
+      roblox_user_id: robloxId || "Unknown",
     });
 
     const script = await getLatestObfuscatedScript(supabase, keyData.project_id) || "-- No obfuscated script available for this project";
@@ -248,7 +285,7 @@ async function sendWebhook(
   supabase: ReturnType<typeof createClient>,
   projectId: string,
   eventType: string,
-  data: Record<string, string>
+  data: Record<string, string | null>
 ) {
   try {
     const { data: webhooks } = await supabase
@@ -257,15 +294,42 @@ async function sendWebhook(
     if (!webhooks?.length) return;
     for (const wh of webhooks) {
       if (eventType === "key_auth" && !wh.log_key_auth) continue;
+      
       const fields = [];
-      if (wh.log_ip !== false) fields.push({ name: "IP", value: `\`${data.ip}\``, inline: true });
-      if (wh.log_hwid !== false) fields.push({ name: "HWID", value: `\`${data.hwid}\``, inline: true });
-      fields.push({ name: "Key", value: `\`${data.key}\``, inline: true });
-      fields.push({ name: "Uses", value: `\`${data.uses}\``, inline: true });
+      
+      // Project info
+      if (wh.log_project !== false && data.project_name) {
+        fields.push({ name: "📁 Project", value: data.project_name, inline: true });
+      }
+      
+      // Roblox user info
+      if (wh.log_roblox_user !== false && data.roblox_username) {
+        fields.push({ name: "👤 Roblox User", value: data.roblox_username, inline: true });
+      }
+      if (wh.log_roblox_age !== false && data.roblox_age) {
+        fields.push({ name: "📅 Account Age", value: data.roblox_age, inline: true });
+      }
+      if (wh.log_roblox_id !== false && data.roblox_user_id) {
+        fields.push({ name: "🆔 User ID", value: `\`${data.roblox_user_id}\``, inline: true });
+      }
+      
+      // Technical details
+      if (wh.log_ip !== false) fields.push({ name: "🌐 IP", value: `\`${data.ip}\``, inline: true });
+      if (wh.log_hwid !== false) fields.push({ name: "🔧 HWID", value: `\`${data.hwid?.slice(0,16)}...\``, inline: true });
+      if (wh.log_key !== false) fields.push({ name: "🔑 Key", value: `\`${data.key}\``, inline: true });
+      if (wh.log_uses !== false) fields.push({ name: "📊 Uses", value: `\`${data.uses}\``, inline: true });
+      
       const embed = {
-        title: `🛡️ NullX.fun — ${eventType.replace(/_/g, " ").toUpperCase()}`,
-        color: 0x32b464, fields, timestamp: new Date().toISOString(),
+        title: `🛡️ NullX.fun — Key Authorized`,
+        color: 0x32b464,
+        fields,
+        timestamp: new Date().toISOString(),
+        footer: { text: `Event: ${eventType}` },
+        thumbnail: {
+          url: "https://cdn.discordapp.com/emojis/1234567890.png" // Placeholder for success icon
+        }
       };
+      
       await fetch(wh.discord_webhook_url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -292,19 +356,4 @@ async function getLatestObfuscatedScript(
 
 function formatUses(currentUses: number, maxUses: number | null) {
   return maxUses === null ? `${currentUses}/∞` : `${currentUses}/${maxUses}`;
-}
-
-async function cleanupExpiredLockedKeys(
-  supabase: ReturnType<typeof createClient>,
-) {
-  try {
-    await supabase
-      .from("license_keys")
-      .delete()
-      .eq("is_active", true)
-      .not("hwid", "is", null)
-      .lt("expires_at", new Date().toISOString());
-  } catch (e) {
-    console.error("cleanupExpiredLockedKeys error:", e);
-  }
 }

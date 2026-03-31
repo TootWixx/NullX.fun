@@ -23,6 +23,12 @@ interface WebhookConfig {
   log_location: boolean;
   log_os: boolean;
   log_hwid: boolean;
+  log_project: boolean;
+  log_roblox_user: boolean;
+  log_roblox_age: boolean;
+  log_roblox_id: boolean;
+  log_key: boolean;
+  log_uses: boolean;
   is_active: boolean;
 }
 
@@ -132,13 +138,48 @@ export default function Webhooks() {
                   </div>
                 </div>
 
+                {/* Roblox User Info Toggles */}
+                <div>
+                  <p className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wider">Roblox Player Info</p>
+                  <div className="flex flex-wrap gap-4">
+                    <div className="flex items-center gap-2">
+                      <Switch checked={wh.log_roblox_user !== false} onCheckedChange={(val) => toggleField(wh, 'log_roblox_user', val)} id={`rbuser-${wh.id}`} />
+                      <Label htmlFor={`rbuser-${wh.id}`} className="text-sm">Username</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch checked={wh.log_roblox_age !== false} onCheckedChange={(val) => toggleField(wh, 'log_roblox_age', val)} id={`rbage-${wh.id}`} />
+                      <Label htmlFor={`rbage-${wh.id}`} className="text-sm">Account Age</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch checked={wh.log_roblox_id !== false} onCheckedChange={(val) => toggleField(wh, 'log_roblox_id', val)} id={`rbid-${wh.id}`} />
+                      <Label htmlFor={`rbid-${wh.id}`} className="text-sm">User ID</Label>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Data Field Toggles */}
                 <div>
                   <p className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wider">Logged Fields</p>
                   <div className="flex flex-wrap gap-4">
                     <div className="flex items-center gap-2">
-                      <Switch checked={wh.log_ip} onCheckedChange={(val) => toggleField(wh, 'log_ip', val)} id={`ip-${wh.id}`} />
+                      <Switch checked={wh.log_project !== false} onCheckedChange={(val) => toggleField(wh, 'log_project', val)} id={`proj-${wh.id}`} />
+                      <Label htmlFor={`proj-${wh.id}`} className="text-sm">Project Name</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch checked={wh.log_key !== false} onCheckedChange={(val) => toggleField(wh, 'log_key', val)} id={`key-${wh.id}`} />
+                      <Label htmlFor={`key-${wh.id}`} className="text-sm">License Key</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch checked={wh.log_uses !== false} onCheckedChange={(val) => toggleField(wh, 'log_uses', val)} id={`uses-${wh.id}`} />
+                      <Label htmlFor={`uses-${wh.id}`} className="text-sm">Usage Count</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch checked={wh.log_ip !== false} onCheckedChange={(val) => toggleField(wh, 'log_ip', val)} id={`ip-${wh.id}`} />
                       <Label htmlFor={`ip-${wh.id}`} className="text-sm">IP Address</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch checked={wh.log_hwid !== false} onCheckedChange={(val) => toggleField(wh, 'log_hwid', val)} id={`hwid-${wh.id}`} />
+                      <Label htmlFor={`hwid-${wh.id}`} className="text-sm">HWID</Label>
                     </div>
                     <div className="flex items-center gap-2">
                       <Switch checked={wh.log_isp} onCheckedChange={(val) => toggleField(wh, 'log_isp', val)} id={`isp-${wh.id}`} />
@@ -151,10 +192,6 @@ export default function Webhooks() {
                     <div className="flex items-center gap-2">
                       <Switch checked={wh.log_os} onCheckedChange={(val) => toggleField(wh, 'log_os', val)} id={`os-${wh.id}`} />
                       <Label htmlFor={`os-${wh.id}`} className="text-sm">OS</Label>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Switch checked={wh.log_hwid} onCheckedChange={(val) => toggleField(wh, 'log_hwid', val)} id={`hwid-${wh.id}`} />
-                      <Label htmlFor={`hwid-${wh.id}`} className="text-sm">HWID</Label>
                     </div>
                   </div>
                 </div>

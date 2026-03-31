@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import { Shield, Check, ExternalLink, Loader2, Key, Copy, Lock, Sparkles, Timer, Youtube, MessageCircle, Globe, User, RefreshCw } from 'lucide-react';
+import { Shield, Check, ExternalLink, Loader2, Key, Copy, Lock, Sparkles, Timer, Youtube, MessageCircle, Globe, User, RefreshCw, Clock, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
@@ -63,6 +63,9 @@ export default function GetKey() {
   const [verifying, setVerifying] = useState(false);
   const [allDone, setAllDone] = useState(false);
   const [fetchingKey, setFetchingKey] = useState(false);
+  const [keyExpired, setKeyExpired] = useState(false);
+  const [keyExpiresAt, setKeyExpiresAt] = useState<string | null>(null);
+  const hasAttemptedAutoFetch = useRef(false);
 
   // Timer state
   const [activeCP, setActiveCP] = useState<string | null>(null);
@@ -105,6 +108,14 @@ export default function GetKey() {
     return () => clearInterval(poll);
   }, [sessionToken, allDone, issuedKey]);
 
+  // Auto-fetch key when all checkpoints are done
+  useEffect(() => {
+    if (allDone && !issuedKey && !fetchingKey && !hasAttemptedAutoFetch.current) {
+      hasAttemptedAutoFetch.current = true;
+      getKey();
+    }
+  }, [allDone, issuedKey, fetchingKey]);
+
   const loadSession = async () => {
     try {
       const savedSession = localStorage.getItem(storageKey);
@@ -125,16 +136,31 @@ export default function GetKey() {
         setSessionToken(data.session_token);
         localStorage.setItem(storageKey, data.session_token);
         if (data.completed_ids?.length) setCompletedIds(new Set<string>(data.completed_ids));
-        if (data.all_done) { 
-          setAllDone(true); 
-          if (data.issued_key) setIssuedKey(data.issued_key); 
+        
+        if (data.key_expired) {
+          setKeyExpired(true);
+          setIssuedKey(data.issued_key || null);
+          setAllDone(true);
+        } else {
+          if (data.key_expires_at) setKeyExpiresAt(data.key_expires_at);
+          if (data.all_done) { 
+            setAllDone(true); 
+            if (data.issued_key) setIssuedKey(data.issued_key); 
+          }
         }
 
         // Also load creator profile
         fetchCreatorProfile(data.project_user_id || '');
       } else {
+        let errMsg = data?.error || funcErr?.message || 'Failed to load session';
+        if (funcErr && 'context' in (funcErr as any)) {
+          try {
+            const body = await (funcErr as any).context.json();
+            if (body?.error) errMsg = body.error;
+          } catch { /* ignore */ }
+        }
         const statusStr = (funcErr as any)?.status ? ` (HTTP ${(funcErr as any).status})` : '';
-        setError((data?.error || funcErr?.message || 'Failed to load session') + statusStr);
+        setError(errMsg + statusStr);
       }
     } catch (err: any) {
       setError(err.message || 'Failed to connect to NullX.fun servers.');
@@ -169,6 +195,13 @@ export default function GetKey() {
       );
       
       if (data) {
+        if (data.key_expired) {
+          setKeyExpired(true);
+          setIssuedKey(data.issued_key || null);
+          setAllDone(true);
+          return;
+        }
+        if (data.key_expires_at) setKeyExpiresAt(data.key_expires_at);
         if (data.completed_ids?.length) setCompletedIds(new Set<string>(data.completed_ids));
         if (data.all_done) {
           setAllDone(true);
@@ -225,6 +258,10 @@ export default function GetKey() {
   const verifyCheckpoint = async (checkpointId: string) => {
     if (!sessionToken) return;
     setVerifying(true);
+    
+    // We snapshot `completedIds` to use inside the callback correctly
+    const prevCompleted = completedIds;
+
     try {
       const { data, error: funcErr } = await supabase.functions.invoke('checkpoint', {
         method: 'POST',
@@ -236,18 +273,42 @@ export default function GetKey() {
       });
 
       if (data && data.success) {
-        setCompletedIds(prev => new Set([...prev, checkpointId]));
+        if (data.key_expired) {
+          setKeyExpired(true);
+          setIssuedKey(data.issued_key || null);
+          setAllDone(true);
+          return;
+        }
+
+        if (data.key_expires_at) setKeyExpiresAt(data.key_expires_at);
+
+        // Update completions locally
+        const nextCompleted = new Set([...prevCompleted, checkpointId]);
+        setCompletedIds(nextCompleted);
         setActiveCP(null); setOpenedAt(null);
-        if (data.all_done) { 
+
+        // ALWAYS compute all_done locally to prevent backend race condition softlocks
+        const isAllLocallyDone = nextCompleted.size === checkpoints.length;
+
+        if (data.all_done || isAllLocallyDone) { 
           setAllDone(true); 
           const k = data.key || data.issued_key; 
           if (k) setIssuedKey(k); 
         }
+        
+        // Remove verifying state quickly so UI feels responsive
         toast({ title: '✅ Checkpoint verified!' });
       } else {
+        let errMsg = data?.error || funcErr?.message || 'Failed to verify';
+        if (funcErr && 'context' in (funcErr as any)) {
+          try {
+            const body = await (funcErr as any).context.json();
+            if (body?.error) errMsg = body.error;
+          } catch { /* ignore */ }
+        }
         toast({ 
           title: 'Verification Failed', 
-          description: data?.error || funcErr?.message || 'Failed to verify', 
+          description: errMsg, 
           variant: 'destructive' 
         });
       }
@@ -269,14 +330,30 @@ export default function GetKey() {
         }
       );
 
+      if (data && data.key_expired) {
+        setKeyExpired(true);
+        setIssuedKey(data.issued_key || null);
+        setAllDone(true);
+        return;
+      }
+
+      if (data && data.key_expires_at) setKeyExpiresAt(data.key_expires_at);
+
       if (data && data.issued_key) { 
         setIssuedKey(data.issued_key); 
       } else {
         const missingCount = data?.missing_ids?.length;
         const diagnostic = missingCount > 0 ? ` (Missing ${missingCount} checkpoints)` : '';
+        let errMsg = data?.error || funcErr?.message || 'Please try again.';
+        if (funcErr && 'context' in (funcErr as any)) {
+          try {
+            const body = await (funcErr as any).context.json();
+            if (body?.error) errMsg = body.error;
+          } catch { /* ignore */ }
+        }
         toast({ 
           title: 'Key not ready yet', 
-          description: (data?.error || funcErr?.message || 'Please try again.') + diagnostic, 
+          description: errMsg + diagnostic, 
           variant: 'destructive' 
         });
       }
@@ -287,6 +364,30 @@ export default function GetKey() {
   const copyKey = () => { if (issuedKey) { navigator.clipboard.writeText(issuedKey); toast({ title: 'Copied!' }); } };
 
   const progress = checkpoints.length > 0 ? (completedIds.size / checkpoints.length) * 100 : 0;
+
+  // Add Live Countdown Hook for active keys
+  const [timeLeftStr, setTimeLeftStr] = useState<string>('');
+  useEffect(() => {
+    if (!keyExpiresAt || keyExpired) return;
+    const updateTime = () => {
+      const ms = new Date(keyExpiresAt).getTime() - Date.now();
+      if (ms <= 0) {
+        setTimeLeftStr('Expired');
+        setKeyExpired(true);
+        return;
+      }
+      const h = Math.floor(ms / (1000 * 60 * 60));
+      const m = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
+      const s = Math.floor((ms % (1000 * 60)) / 1000);
+      let str = '';
+      if (h > 0) str += `${h}h `;
+      str += `${m}m ${s}s`;
+      setTimeLeftStr(str);
+    };
+    updateTime();
+    const iv = setInterval(updateTime, 1000);
+    return () => clearInterval(iv);
+  }, [keyExpiresAt, keyExpired]);
 
   // ── Loading ──────────────────────────────────────────────────────────────────
   if (loading) return (
@@ -395,8 +496,38 @@ export default function GetKey() {
           </div>
         </div>
 
+        {/* ── Key Revoked / Expired Block ─────────────────────────────────── */}
+        {keyExpired && (
+          <div className="w-full max-w-md bg-[#0a0404]/90 backdrop-blur-xl border border-red-500/30 rounded-3xl p-8 text-center shadow-[0_0_40px_rgba(239,68,68,0.15)] relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-red-600 via-rose-500 to-orange-500"></div>
+            
+            <div className="flex justify-center mb-6">
+              <div className="h-20 w-20 rounded-full bg-red-500/10 flex items-center justify-center ring-4 ring-red-500/20">
+                <AlertTriangle className="h-10 w-10 text-red-500 drop-shadow-[0_0_15px_rgba(239,68,68,0.8)]" />
+              </div>
+            </div>
+
+            <h2 className="text-2xl font-extrabold text-white mb-3">Your Time is Up!</h2>
+            <p className="text-sm text-red-200/80 leading-relaxed mb-6 px-2">
+              You already claimed a key for this project in the past and its time has expired. Our system strictly enforces <strong className="text-white font-bold tracking-wide">one key per user</strong>.
+            </p>
+
+            <div className="bg-black/40 rounded-xl p-4 mb-6 border border-red-500/10">
+              <p className="text-[11px] uppercase tracking-widest text-gray-500 font-semibold mb-2">Original Key</p>
+              <code className="font-mono text-sm text-gray-400 select-all">{issuedKey || 'Unknown'}</code>
+            </div>
+
+            <a href="/instructions" target="_blank" rel="noopener noreferrer">
+              <Button className="w-full py-6 text-[15px] font-bold text-white bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 border border-red-400/50 shadow-[0_0_20px_rgba(239,68,68,0.4)] transition-all hover:scale-[1.02] hover:shadow-[0_0_25px_rgba(239,68,68,0.5)] rounded-xl">
+                <Clock className="w-5 h-5 mr-2" />
+                Want more time? Click here to Extend!
+              </Button>
+            </a>
+          </div>
+        )}
+
         {/* ── Progress bar ─────────────────────────────────────────────────── */}
-        {!issuedKey && (
+        {!issuedKey && !keyExpired && (
           <div className="w-full max-w-md mb-5 space-y-1.5">
             <div className="flex justify-between text-[11px] text-gray-500">
               <span>Progress</span>
@@ -412,9 +543,19 @@ export default function GetKey() {
         )}
 
         {/* ── Key Reveal ──────────────────────────────────────────────────── */}
-        {issuedKey && (
-          <div className="w-full max-w-md glass rounded-2xl p-8 text-center space-y-5 shadow-2xl" style={{ borderColor: 'rgba(139,92,246,0.35)' }}>
-            <div className="flex flex-col items-center gap-3">
+        {issuedKey && !keyExpired && (
+          <div className="w-full max-w-md glass rounded-2xl p-8 text-center space-y-5 shadow-2xl relative overflow-hidden" style={{ borderColor: 'rgba(139,92,246,0.35)' }}>
+            {/* Live countdown badge top right */}
+            {timeLeftStr && (
+              <div className="absolute top-4 right-4 bg-violet-500/10 border border-violet-500/30 rounded-lg px-3 py-1.5 flex items-center shadow-[0_0_10px_rgba(139,92,246,0.1)]">
+                <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse mr-2" />
+                <span className="text-xs font-mono font-semibold text-violet-300">
+                  {timeLeftStr}
+                </span>
+              </div>
+            )}
+
+            <div className="flex flex-col items-center gap-3 mt-4">
               <div className="h-16 w-16 rounded-2xl bg-violet-500/10 ring-1 ring-violet-500/30 flex items-center justify-center" style={{ animation: 'float 3s ease-in-out infinite' }}>
                 <Key className="h-8 w-8 text-violet-400" />
               </div>
@@ -436,26 +577,35 @@ export default function GetKey() {
             <Button onClick={copyKey} className="nova-btn w-full py-3 rounded-xl">
               <Copy className="h-4 w-4 mr-2" /> Copy Key
             </Button>
+
+            {/* Added for Extensions */}
+            <div className="pt-4 mt-2 border-t border-violet-500/20">
+              <a href="/instructions" target="_blank" rel="noopener noreferrer">
+                <Button type="button" variant="secondary" className="w-full py-5 rounded-xl border border-violet-500/30 text-violet-300 font-bold hover:text-white transition-colors bg-violet-500/10 hover:bg-violet-500/20 shadow-[0_0_15px_rgba(139,92,246,0.1)]">
+                  <Clock className="h-4 w-4 mr-2" /> Want to Extend your Key Time?? CLICK ME
+                </Button>
+              </a>
+            </div>
           </div>
         )}
 
         {/* ── Get Key Button (allDone but key not yet loaded) ─────────────── */}
-        {allDone && !issuedKey && (
+        {allDone && !issuedKey && !keyExpired && (
           <div className="w-full max-w-md glass rounded-2xl p-8 text-center space-y-5" style={{ borderColor: 'rgba(139,92,246,0.35)' }}>
             <Sparkles className="h-10 w-10 text-violet-400 mx-auto" style={{ animation: 'float 3s ease-in-out infinite' }} />
             <div>
               <h2 className="text-lg font-bold text-white">All Checkpoints Complete!</h2>
-              <p className="text-xs text-gray-500 mt-1">Click below to claim your license key</p>
+              <p className="text-xs text-gray-500 mt-1">Your key is being generated...</p>
             </div>
             <Button onClick={getKey} disabled={fetchingKey} className="nova-btn w-full py-4 rounded-xl text-base">
               {fetchingKey ? <Loader2 className="h-5 w-5 animate-spin mr-2" /> : <Key className="h-5 w-5 mr-2" />}
-              {fetchingKey ? 'Generating…' : 'Get Key'}
+              {fetchingKey ? 'Generating…' : 'Try Manually'}
             </Button>
           </div>
         )}
 
         {/* ── Checkpoints ─────────────────────────────────────────────────── */}
-        {!issuedKey && (
+        {!issuedKey && !keyExpired && (
           <div className="w-full max-w-md space-y-3">
             {checkpoints.map((cp, idx) => {
               const isCompleted = completedIds.has(cp.id);

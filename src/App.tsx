@@ -10,6 +10,7 @@ import Auth from "./pages/Auth";
 import Pricing from "./pages/Pricing";
 import Protected from "./pages/Protected";
 import GetKey from "./pages/GetKey";
+import Instructions from "./pages/Instructions";
 import NotFound from "./pages/NotFound";
 import DashboardLayout from "./components/DashboardLayout";
 import Projects from "./pages/dashboard/Projects";
@@ -91,6 +92,7 @@ const App = () => (
               <Route path="/" element={<Index />} />
               <Route path="/auth" element={<Auth />} />
               <Route path="/pricing" element={<Pricing />} />
+              <Route path="/instructions" element={<Instructions />} />
               <Route path="/protected/:id" element={<Protected />} />
               <Route path="/get-key/:projectId" element={<GetKey />} />
               <Route path="/dashboard/*" element={<DashboardRoutes />} />
