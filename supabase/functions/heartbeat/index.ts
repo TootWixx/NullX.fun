@@ -125,6 +125,33 @@ Deno.serve(async (req) => {
       }));
     }
 
+    // Check for user messages (replies) that the game client should display
+    const { data: userMessages } = await supabase
+      .from("message_threads")
+      .select("id, message, reply_to_message_id, created_at")
+      .eq("session_id", session_id)
+      .eq("sender_type", "user")
+      .eq("is_delivered", false)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    if (userMessages && userMessages.length > 0) {
+      // Mark user messages as delivered
+      const userMessageIds = userMessages.map(m => m.id);
+      await supabase
+        .from("message_threads")
+        .update({ is_delivered: true })
+        .in("id", userMessageIds);
+
+      // Add user messages to response
+      response.user_messages = userMessages.map(m => ({
+        id: m.id,
+        message: m.message,
+        reply_to_id: m.reply_to_message_id,
+        timestamp: m.created_at,
+      }));
+    }
+
     // Legacy message field support (single message)
     if (session.message && !response.notifications) {
       response.notification = {

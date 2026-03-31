@@ -1179,7 +1179,8 @@ local function OpenChatWindow()
     closeCorner.CornerRadius = UDim.new(0, 6)
     
     closeBtn.MouseButton1Click:Connect(function()
-        ChatUI.Visible = false
+        ChatUI:Destroy()
+        ChatUI = nil
         ShowFloatingButton()
     end)
     
@@ -1219,12 +1220,29 @@ local function OpenChatWindow()
     inputBox.Position = UDim2.new(0, 15, 0, 5)
     inputBox.BackgroundTransparency = 1
     inputBox.Text = ""
-    inputBox.PlaceholderText = "Type a message..."
+    inputBox.PlaceholderText = "Click to open a chat..."
     inputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
     inputBox.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
     inputBox.Font = Enum.Font.Gotham
     inputBox.TextSize = 14
     inputBox.ClearTextOnFocus = false
+    
+    -- Handle initial chat open
+    local isFirstMessage = true
+    local function OpenChatPrompt()
+        if isFirstMessage then
+            inputBox.PlaceholderText = "Type your first message..."
+            inputBox.Text = ""
+            isFirstMessage = false
+            -- Show the chat window when user starts typing
+            ChatUI.Visible = true
+            if FloatingButton then
+                FloatingButton.Visible = false
+            end
+        end
+    end
+    
+    inputBox.Focused:Connect(OpenChatPrompt)
     
     local sendBtn = Instance.new("TextButton", inputBg)
     sendBtn.Size = UDim2.new(0, 50, 0, 30)
@@ -1490,18 +1508,30 @@ task.spawn(function()
                         ShowFloatingButton()
                     end
                     
-                    -- Legacy message support
-                    if hData.message and not hData.notification then
-                        game:GetService("StarterGui"):SetCore("SendNotification", {
-                            Title = "NullX.fun",
-                            Text = hData.message,
-                            Duration = 10,
-                        })
+                    -- Handle user replies/messages sent back
+                    if hData.user_messages and #hData.user_messages > 0 then
+                        for _, msg in ipairs(hData.user_messages) do
+                            table.insert(MessageHistory, {
+                                id = msg.id,
+                                sender = "user",
+                                message = msg.message,
+                                timestamp = msg.timestamp,
+                                can_reply = true
+                            })
+                            -- Show notification for user message
+                            ShowNotification({
+                                id = msg.id,
+                                message = "Reply: " .. msg.message,
+                                notification_type = "message",
+                                can_reply = true
+                            })
+                            ShowFloatingButton()
+                        end
                     end
                 end
             end
         end
-        task.wait(8)
+        task.wait(2)
     end
 end)
 `;

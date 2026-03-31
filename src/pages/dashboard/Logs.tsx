@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { ScrollText, Users, MessageSquare, Skull, RefreshCw, Smartphone, Monitor, Gamepad2, Trash2 } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
@@ -36,9 +37,29 @@ interface ActiveSession {
 
 interface Project { id: string; name: string; }
 
+interface MessageThread {
+  id: string;
+  session_id: string;
+  sender_type: 'admin' | 'user';
+  message: string;
+  notification_type: string;
+  can_reply: boolean;
+  is_delivered: boolean;
+  reply_to_message_id: string | null;
+  created_at: string;
+  active_sessions?: {
+    id: string;
+    license_keys?: { key_value: string };
+    details?: { roblox_username?: string };
+  };
+}
+
 export default function Logs() {
   const [logs, setLogs] = useState<Log[]>([]);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
+  const [activeChats, setActiveChats] = useState<MessageThread[]>([]);
+  const [selectedThread, setSelectedThread] = useState<string | null>(null);
+  const [threadMessages, setThreadMessages] = useState<MessageThread[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [filter, setFilter] = useState('all');
   const [loading, setLoading] = useState(true);
@@ -83,7 +104,11 @@ export default function Logs() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 10000); // Auto refresh every 10s
+    fetchActiveChats();
+    const interval = setInterval(() => {
+      fetchData();
+      fetchActiveChats();
+    }, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -115,7 +140,7 @@ export default function Logs() {
     }
   };
 
-  const handleSendMessage = async (allowReply = false) => {
+  const handleSendMessageAndOpenChat = async (allowReply = false) => {
     if (!selectedSession || !msgInput.trim()) return;
     
     // Store in message_threads for custom notification system
@@ -130,12 +155,16 @@ export default function Logs() {
     if (error) toast({ title: 'Error', description: error.message, variant: 'destructive' });
     else {
       toast({ 
-        title: 'Message Sent', 
-        description: allowReply ? 'User can reply to this message.' : 'Message will appear as a custom notification.'
+        title: 'Chat Opened', 
+        description: 'Message sent. Chat is now active.'
       });
       setMsgInput('');
       setSelectedSession(null);
       fetchData();
+      fetchActiveChats();
+      // Open the conversation thread
+      setSelectedThread(selectedSession);
+      fetchThreadMessages(selectedSession);
     }
   };
 
@@ -146,6 +175,24 @@ export default function Logs() {
           toast({ title: 'Session Cleared' });
           fetchData();
       }
+  };
+
+  const fetchActiveChats = async () => {
+    const { data } = await supabase
+      .from('message_threads')
+      .select('*, active_sessions(id, license_keys(key_value), details)')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (data) setActiveChats(data as MessageThread[]);
+  };
+
+  const fetchThreadMessages = async (sessionId: string) => {
+    const { data } = await supabase
+      .from('message_threads')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true });
+    if (data) setThreadMessages(data as MessageThread[]);
   };
 
   const getPlaytime = (createdAt: string) => {
@@ -229,6 +276,15 @@ export default function Logs() {
               {activeSessions.length > 0 && (
                 <span className="ml-2 rounded-full bg-primary/20 px-1.5 py-0.5 text-[10px] font-bold text-primary animate-pulse">
                   {activeSessions.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="chats" className="data-[state=active]:bg-background data-[state=active]:shadow-sm">
+              <MessageSquare className="h-4 w-4 mr-2" />
+              Active Chats
+              {activeChats.length > 0 && (
+                <span className="ml-2 rounded-full bg-green-500/20 px-1.5 py-0.5 text-[10px] font-bold text-green-600 animate-pulse">
+                  {activeChats.length}
                 </span>
               )}
             </TabsTrigger>
@@ -369,7 +425,7 @@ export default function Logs() {
 
                         <Dialog open={selectedSession === session.id} onOpenChange={(open) => setSelectedSession(open ? session.id : null)}>
                           <DialogTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7 text-primary hover:bg-primary/10" title="Send Live Message">
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-primary hover:bg-primary/10" title="Open Chat">
                               <MessageSquare className="h-3.5 w-3.5" />
                             </Button>
                           </DialogTrigger>
@@ -403,11 +459,11 @@ export default function Logs() {
                               <Button 
                                 onClick={() => {
                                   const allowReply = (document.getElementById(`allow-reply-${session.id}`) as HTMLInputElement)?.checked || false;
-                                  handleSendMessage(allowReply);
+                                  handleSendMessageAndOpenChat(allowReply);
                                 }} 
                                 disabled={!msgInput.trim()}
                               >
-                                Send Notification
+                                Open Chat
                               </Button>
                             </DialogFooter>
                           </DialogContent>
@@ -458,6 +514,104 @@ export default function Logs() {
             </div>
           )}
         </TabsContent>
+
+        <TabsContent value="chats">
+          {activeChats.length === 0 ? (
+            <Card className="border-dashed">
+              <div className="flex flex-col items-center justify-center py-12 text-center">
+                <MessageSquare className="h-10 w-10 text-muted-foreground mb-3" />
+                <p className="text-muted-foreground">No active chats.</p>
+                <p className="text-xs text-muted-foreground mt-1 px-4">Send messages to players to start conversations.</p>
+              </div>
+            </Card>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {activeChats.map((chat) => (
+                <Card key={chat.id} className="overflow-hidden border-l-4 border-l-green-500 shadow-sm hover:shadow-md transition-all">
+                  <CardHeader className="pb-2 pt-4 px-4">
+                    <div className="space-y-1">
+                      <CardTitle className="text-sm font-bold flex items-center gap-2">
+                        <Users className="h-4 w-4" />
+                        {chat.active_sessions?.details?.roblox_username || 'Unknown User'}
+                      </CardTitle>
+                      <CardDescription className="text-[11px]">
+                        Key: {chat.active_sessions?.license_keys?.key_value?.slice(0, 12)}...
+                      </CardDescription>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="px-4 pb-4 space-y-2">
+                    <div className="rounded bg-muted/50 p-2 text-[11px]">
+                      <span className={chat.sender_type === 'admin' ? 'text-primary' : 'text-blue-500'}>
+                        {chat.sender_type === 'admin' ? 'You: ' : 'User: '}
+                      </span>
+                      <span className="text-foreground/80">{chat.message.slice(0, 60)}{chat.message.length > 60 && '...'}</span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">
+                      {new Date(chat.created_at).toLocaleString()}
+                    </p>
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      className="w-full mt-2"
+                      onClick={() => {
+                        setSelectedThread(chat.session_id);
+                        fetchThreadMessages(chat.session_id);
+                      }}
+                    >
+                      View Conversation
+                    </Button>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        {/* Message Thread Dialog */}
+        <Dialog open={!!selectedThread} onOpenChange={(open) => !open && setSelectedThread(null)}>
+          <DialogContent className="sm:max-w-[500px] max-h-[80vh]">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <MessageSquare className="h-5 w-5" />
+                Conversation Thread
+              </DialogTitle>
+              <DialogDescription>
+                Viewing message history with player
+              </DialogDescription>
+            </DialogHeader>
+            <div className="py-4 max-h-[50vh] overflow-y-auto space-y-3">
+              {threadMessages.length === 0 ? (
+                <p className="text-center text-muted-foreground text-sm">No messages</p>
+              ) : (
+                threadMessages.map((msg) => (
+                  <div 
+                    key={msg.id} 
+                    className={`flex ${msg.sender_type === 'admin' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div 
+                      className={`max-w-[80%] rounded-lg p-3 text-sm ${
+                        msg.sender_type === 'admin' 
+                          ? 'bg-primary text-primary-foreground rounded-br-none' 
+                          : 'bg-muted rounded-bl-none'
+                      }`}
+                    >
+                      <p className="font-medium text-[10px] opacity-80 mb-1">
+                        {msg.sender_type === 'admin' ? 'You (Admin)' : 'Player'}
+                      </p>
+                      <p>{msg.message}</p>
+                      <p className="text-[9px] opacity-60 mt-1 text-right">
+                        {new Date(msg.created_at).toLocaleTimeString()}
+                      </p>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setSelectedThread(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </Tabs>
     </div>
   );
